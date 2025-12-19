@@ -282,8 +282,10 @@ class BrokerCog(commands.Cog):
                     # Let's take the Minimum modifier found.
                     if sat_mult < multiplier:
                          multiplier = sat_mult
-
+        
         return max(multiplier, 0.1)
+
+
 
     @commands.command(name="trends")
     async def trends(self, ctx):
