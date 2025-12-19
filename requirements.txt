@@ -1,0 +1,6 @@
+discord.py
+aiosqlite
+gradio_client
+ImageHash
+Pillow
+python-dotenv
