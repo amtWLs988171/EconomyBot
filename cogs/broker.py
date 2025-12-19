@@ -16,6 +16,173 @@ import math
 from datetime import datetime, time, timedelta
 from utils.bloom_filter import BloomFilter
 
+class InventoryView(discord.ui.View):
+    def __init__(self, ctx, items, per_page=5):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+        self.items = items
+        self.per_page = per_page
+        self.current_page = 0
+        self.max_page = max(0, (len(items) - 1) // per_page)
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.prev_btn.disabled = self.current_page == 0
+        self.next_btn.disabled = self.current_page == self.max_page
+
+    def get_embed(self):
+        start = self.current_page * self.per_page
+        end = start + self.per_page
+        batch = self.items[start:end]
+        
+        embed = discord.Embed(title=f"🎒 {self.ctx.author.display_name}の持ち物 ({self.current_page + 1}/{self.max_page + 1})", color=discord.Color.gold())
+        if not batch:
+             embed.description = "表示するアイテムがありません。"
+             return embed
+             
+        description = ""
+        for item_id, tags, thread_id, score in batch:
+            tag_summary = tags.split(",")[0] if tags else "不明"
+            thread_link = f"<#{thread_id}>" if thread_id else "不明"
+            description += f"**ID: {item_id}** | {tag_summary} (Score: {score:.1f}) | {thread_link}\n"
+        
+        embed.description = description
+        embed.set_footer(text=f"Total: {len(self.items)} items")
+        return embed
+
+    @discord.ui.button(label="◀️", style=discord.ButtonStyle.blurple)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.ctx.author:
+            await interaction.response.send_message("自分以外のインベントリは操作できません。", ephemeral=True)
+            return
+
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.blurple)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.ctx.author:
+            await interaction.response.send_message("自分以外のインベントリは操作できません。", ephemeral=True)
+            return
+
+        if self.current_page < self.max_page:
+            self.current_page += 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+        else:
+             await interaction.response.defer()
+
+class ResellPriceModal(discord.ui.Modal, title="再販価格の設定"):
+    def __init__(self, bot, item_id):
+        super().__init__()
+        self.bot = bot
+        self.item_id = item_id
+        self.price_input = discord.ui.TextInput(
+            label="価格 (Credits)",
+            placeholder="100以上の整数",
+            min_length=3,
+            max_length=10
+        )
+        self.add_item(self.price_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            price = int(self.price_input.value)
+            if price < 100: raise ValueError
+        except:
+             await interaction.response.send_message("❌ 価格は100以上の整数で入力してください。", ephemeral=True)
+             return
+
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
+            # Re-verify ownership
+            cursor = await db.execute("""
+                SELECT thread_id, message_id, tags, aesthetic_score FROM market_items 
+                WHERE item_id = ? AND buyer_id = ? AND status = 'sold'
+            """, (self.item_id, interaction.user.id))
+            row = await cursor.fetchone()
+            
+            if not row:
+                await interaction.response.send_message("❌ エラー: アイテムを所有していないか、既に販売中です。", ephemeral=True)
+                return
+            
+            thread_id, message_id, tags, score = row
+            
+            # Update DB
+            await db.execute("""
+                UPDATE market_items 
+                SET status = 'on_sale', price = ?, seller_id = ?, buyer_id = NULL 
+                WHERE item_id = ?
+            """, (price, interaction.user.id, self.item_id))
+            await db.commit()
+            
+            # Update Gallery Message
+            try:
+                guild = interaction.guild
+                thread = guild.get_thread(thread_id)
+                if not thread:
+                     try: thread = await guild.fetch_channel(thread_id)
+                     except: pass
+                
+                if thread:
+                     try:
+                         msg = await thread.fetch_message(message_id)
+                         
+                         # Edit Embed
+                         embed = msg.embeds[0]
+                         embed.clear_fields()
+                         embed.title = "🔄 再販中 (Resale)"
+                         embed.color = discord.Color.orange()
+                         
+                         tags_str = tags if tags else "None"
+                         grade = "B"
+                         if score >= 9.0: grade = "S"
+                         elif score >= 7.0: grade = "A"
+                         
+                         embed.add_field(name="ID", value=f"**#{self.item_id}**", inline=True)
+                         embed.add_field(name="販売者", value=interaction.user.mention, inline=True)
+                         embed.add_field(name="価格", value=f"💰 {price:,}", inline=True)
+                         embed.add_field(name="グレード", value=f"**{grade}** ({score:.2f})", inline=True)
+                         embed.add_field(name="特徴 (Tags)", value=tags_str, inline=False)
+                         
+                         from cogs.market import BuyView
+                         await msg.edit(content=f"📢 **再販中!** (ID: {self.item_id})", embed=embed, view=BuyView(self.bot))
+                         
+                         await interaction.response.send_message(f"✅ **再販設定完了！** (ID: {self.item_id}, Price: {price:,})\n🔗 {msg.jump_url}")
+                         return
+                     except Exception as e:
+                         print(f"Failed to edit msg: {e}")
+            except Exception as e:
+                print(f"Resell Error: {e}")
+            
+            await interaction.response.send_message(f"✅ **再販設定完了(DBのみ)**: 元のメッセージが見つかりませんでしたが、販売リストには追加されました。")
+
+class ResellSelect(discord.ui.Select):
+    def __init__(self, bot, items):
+        options = []
+        for item_id, tags, score in items[:25]: # Max 25 options
+            tag_summary = tags.split(",")[0] if tags else "Unknown"
+            options.append(discord.SelectOption(
+                label=f"ID: {item_id}",
+                description=f"Score: {score:.1f} | {tag_summary}",
+                value=str(item_id)
+            ))
+        super().__init__(placeholder="再販するアイテムを選択してください...", min_values=1, max_values=1, options=options)
+        self.bot = bot
+
+    async def callback(self, interaction: discord.Interaction):
+        item_id = int(self.values[0])
+        await interaction.response.send_modal(ResellPriceModal(self.bot, item_id))
+
+class ResellSelectView(discord.ui.View):
+    def __init__(self, bot, items):
+        super().__init__(timeout=60)
+        self.add_item(ResellSelect(bot, items))
+
+
 class BrokerCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -805,67 +972,7 @@ class BrokerCog(commands.Cog):
         
         await ctx.send("🔥 **リセット完了/WIPE COMPLETE**\n全てのデータが削除されました。`!init_server` からやり直してください。")
 
-class InventoryView(discord.ui.View):
-    def __init__(self, ctx, items, per_page=5):
-        super().__init__(timeout=60)
-        self.ctx = ctx
-        self.items = items
-        self.per_page = per_page
-        self.current_page = 0
-        self.max_page = max(0, (len(items) - 1) // per_page)
-        self.update_buttons()
 
-    def update_buttons(self):
-        self.prev_btn.disabled = self.current_page == 0
-        self.next_btn.disabled = self.current_page == self.max_page
-
-    def get_embed(self):
-        start = self.current_page * self.per_page
-        end = start + self.per_page
-        batch = self.items[start:end]
-        
-        embed = discord.Embed(title=f"🎒 {self.ctx.author.display_name}の持ち物 ({self.current_page + 1}/{self.max_page + 1})", color=discord.Color.gold())
-        if not batch:
-             embed.description = "表示するアイテムがありません。"
-             return embed
-             
-        description = ""
-        for item_id, tags, thread_id, score in batch:
-            # Shorten tags
-            tag_summary = tags.split(",")[0] if tags else "不明"
-            # Link to thread
-            thread_link = f"<#{thread_id}>" if thread_id else "不明"
-            description += f"**ID: {item_id}** | {tag_summary} (Score: {score:.1f}) | {thread_link}\n"
-        
-        embed.description = description
-        embed.set_footer(text=f"Total: {len(self.items)} items")
-        return embed
-
-    @discord.ui.button(label="◀️", style=discord.ButtonStyle.blurple)
-    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.ctx.author:
-            await interaction.response.send_message("自分以外のインベントリは操作できません。", ephemeral=True)
-            return
-
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.update_buttons()
-            await interaction.response.edit_message(embed=self.get_embed(), view=self)
-        else:
-            await interaction.response.defer()
-
-    @discord.ui.button(label="▶️", style=discord.ButtonStyle.blurple)
-    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.ctx.author:
-            await interaction.response.send_message("自分以外のインベントリは操作できません。", ephemeral=True)
-            return
-
-        if self.current_page < self.max_page:
-            self.current_page += 1
-            self.update_buttons()
-            await interaction.response.edit_message(embed=self.get_embed(), view=self)
-        else:
-             await interaction.response.defer()
 
     @commands.command(name="inventory", aliases=["bag", "inv"])
     async def inventory(self, ctx):
@@ -885,111 +992,7 @@ class InventoryView(discord.ui.View):
         view = InventoryView(ctx, rows, per_page=5)
         await ctx.send(embed=view.get_embed(), view=view)
 
-class ResellPriceModal(discord.ui.Modal, title="再販価格の設定"):
-    def __init__(self, bot, item_id):
-        super().__init__()
-        self.bot = bot
-        self.item_id = item_id
-        self.price_input = discord.ui.TextInput(
-            label="価格 (Credits)",
-            placeholder="100以上の整数",
-            min_length=3,
-            max_length=10
-        )
-        self.add_item(self.price_input)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            price = int(self.price_input.value)
-            if price < 100: raise ValueError
-        except:
-             await interaction.response.send_message("❌ 価格は100以上の整数で入力してください。", ephemeral=True)
-             return
-
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            # Re-verify ownership
-            cursor = await db.execute("""
-                SELECT thread_id, message_id, tags, aesthetic_score FROM market_items 
-                WHERE item_id = ? AND buyer_id = ? AND status = 'sold'
-            """, (self.item_id, interaction.user.id))
-            row = await cursor.fetchone()
-            
-            if not row:
-                await interaction.response.send_message("❌ エラー: アイテムを所有していないか、既に販売中です。", ephemeral=True)
-                return
-            
-            thread_id, message_id, tags, score = row
-            
-            # Update DB
-            await db.execute("""
-                UPDATE market_items 
-                SET status = 'on_sale', price = ?, seller_id = ?, buyer_id = NULL 
-                WHERE item_id = ?
-            """, (price, interaction.user.id, self.item_id))
-            await db.commit()
-            
-            # Update Gallery Message
-            try:
-                guild = interaction.guild
-                thread = guild.get_thread(thread_id)
-                if not thread:
-                     try: thread = await guild.fetch_channel(thread_id)
-                     except: pass
-                
-                if thread:
-                     try:
-                         msg = await thread.fetch_message(message_id)
-                         
-                         # Edit Embed
-                         embed = msg.embeds[0]
-                         embed.clear_fields()
-                         embed.title = "🔄 再販中 (Resale)"
-                         embed.color = discord.Color.orange()
-                         
-                         tags_str = tags if tags else "None"
-                         grade = "B"
-                         if score >= 9.0: grade = "S"
-                         elif score >= 7.0: grade = "A"
-                         
-                         embed.add_field(name="ID", value=f"**#{self.item_id}**", inline=True)
-                         embed.add_field(name="販売者", value=interaction.user.mention, inline=True)
-                         embed.add_field(name="価格", value=f"💰 {price:,}", inline=True)
-                         embed.add_field(name="グレード", value=f"**{grade}** ({score:.2f})", inline=True)
-                         embed.add_field(name="特徴 (Tags)", value=tags_str, inline=False)
-                         
-                         from cogs.market import BuyView
-                         await msg.edit(content=f"📢 **再販中!** (ID: {self.item_id})", embed=embed, view=BuyView(self.bot))
-                         
-                         await interaction.response.send_message(f"✅ **再販設定完了！** (ID: {self.item_id}, Price: {price:,})\n🔗 {msg.jump_url}")
-                         return
-                     except Exception as e:
-                         print(f"Failed to edit msg: {e}")
-            except Exception as e:
-                print(f"Resell Error: {e}")
-            
-            await interaction.response.send_message(f"✅ **再販設定完了(DBのみ)**: 元のメッセージが見つかりませんでしたが、販売リストには追加されました。")
-
-class ResellSelect(discord.ui.Select):
-    def __init__(self, bot, items):
-        options = []
-        for item_id, tags, score in items[:25]: # Max 25 options
-            tag_summary = tags.split(",")[0] if tags else "Unknown"
-            options.append(discord.SelectOption(
-                label=f"ID: {item_id}",
-                description=f"Score: {score:.1f} | {tag_summary}",
-                value=str(item_id)
-            ))
-        super().__init__(placeholder="再販するアイテムを選択してください...", min_values=1, max_values=1, options=options)
-        self.bot = bot
-
-    async def callback(self, interaction: discord.Interaction):
-        item_id = int(self.values[0])
-        await interaction.response.send_modal(ResellPriceModal(self.bot, item_id))
-
-class ResellSelectView(discord.ui.View):
-    def __init__(self, bot, items):
-        super().__init__(timeout=60)
-        self.add_item(ResellSelect(bot, items))
 
     @commands.command(name="resell")
     async def resell(self, ctx):
