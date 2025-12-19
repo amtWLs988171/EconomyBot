@@ -14,3 +14,10 @@ venv/
 
 # OS
 .DS_Store
+
+# SQLite WAL files
+*.db-wal
+*.db-shm
+
+*.db-wal
+*.db-shm

@@ -79,34 +79,38 @@ class StocksCog(commands.Cog):
             await db.commit()
         # print("📉 Market Volatility Applied.")
 
-    async def get_stock_price(self, tag_name):
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-             cursor = await db.execute("SELECT current_price FROM tag_stocks WHERE tag_name = ?", (tag_name,))
+    async def get_stock_price(self, tag_name, db_conn=None):
+        if db_conn:
+             cursor = await db_conn.execute("SELECT current_price FROM tag_stocks WHERE tag_name = ?", (tag_name,))
              row = await cursor.fetchone()
              if row: return row[0]
              
              # If not exists, init it
-             await db.execute("INSERT OR IGNORE INTO tag_stocks (tag_name) VALUES (?)", (tag_name,))
-             await db.commit()
+             await db_conn.execute("INSERT OR IGNORE INTO tag_stocks (tag_name) VALUES (?)", (tag_name,))
              return 100.0
+        else:
+            async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
+                 return await self.get_stock_price(tag_name, db)
 
-    async def update_stock_price(self, tag_name, multiplier):
-        """Called by other Cogs to influence price. 
-        Multiplier example: 1.05 for +5%, 0.99 for -1%."""
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            await db.execute("""
+    async def update_stock_price(self, tag_name, multiplier, db_conn=None):
+        """Called by other Cogs to influence price."""
+        if db_conn:
+            await db_conn.execute("""
                 INSERT INTO tag_stocks (tag_name, current_price) VALUES (?, 100)
                 ON CONFLICT(tag_name) DO UPDATE SET current_price = max(1.0, current_price * ?)
             """, (tag_name, multiplier))
-            await db.commit()
+        else:
+            async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
+                await self.update_stock_price(tag_name, multiplier, db)
+                await db.commit()
 
     async def process_buy(self, interaction, tag, amount):
         async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            current_price = await self.get_stock_price(tag)
+            current_price = await self.get_stock_price(tag, db_conn=db)
             cost = int(current_price * amount)
             
             try:
-                await self.bot.bank.withdraw_credits(interaction.user, cost)
+                await self.bot.bank.withdraw_credits(interaction.user, cost, db_conn=db)
             except ValueError:
                  await interaction.response.send_message(f"❌ 資金不足: {cost:,} Cr 必要", ephemeral=True)
                  return
@@ -124,12 +128,12 @@ class StocksCog(commands.Cog):
             else:
                 await db.execute("INSERT INTO user_stocks (user_id, tag_name, amount, average_cost) VALUES (?, ?, ?, ?)", (interaction.user.id, tag, amount, current_price))
             
-            await db.commit()
-            
             # Influence Price (Buying raises price slightly: +0.01% per share?)
             # Limit impact to avoid exploits
             impact = 1.0 + (min(amount, 100) * 0.0001) 
-            await self.update_stock_price(tag, impact)
+            await self.update_stock_price(tag, impact, db_conn=db)
+            
+            await db.commit()
             
             await interaction.response.send_message(f"📈 **購入完了:** `{tag}` x{amount}株 (取得単価: {current_price:.1f})")
 
@@ -142,7 +146,7 @@ class StocksCog(commands.Cog):
                  await interaction.response.send_message(f"❌ 保有株式が不足しています。", ephemeral=True)
                  return
             
-            current_price = await self.get_stock_price(tag)
+            current_price = await self.get_stock_price(tag, db_conn=db)
             payout = int(current_price * amount)
             profit = payout - (row[1] * amount)
             
@@ -152,12 +156,13 @@ class StocksCog(commands.Cog):
             else:
                 await db.execute("UPDATE user_stocks SET amount = ? WHERE user_id = ? AND tag_name = ?", (new_amt, interaction.user.id, tag))
             
-            await self.bot.bank.deposit_credits(interaction.user, payout)
-            await db.commit()
+            await self.bot.bank.deposit_credits(interaction.user, payout, db_conn=db)
             
             # Selling lowers price
             impact = 1.0 - (min(amount, 100) * 0.0001)
-            await self.update_stock_price(tag, impact)
+            await self.update_stock_price(tag, impact, db_conn=db)
+
+            await db.commit()
             
             profit_str = f"利益: +{int(profit):,}" if profit >= 0 else f"損失: {int(profit):,}"
             await interaction.response.send_message(f"📉 **売却完了:** `{tag}` x{amount}株 ({profit_str}) -> `{payout:,} Cr` 受取")

@@ -152,93 +152,92 @@ class BankSystem:
             
             await db.commit()
 
-    async def get_balance(self, user: discord.Member) -> int:
-        async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
-            cursor = await db.execute(
+    async def get_balance(self, user: discord.Member, db_conn=None) -> int:
+        if db_conn:
+            cursor = await db_conn.execute(
                 "SELECT balance FROM bank WHERE user_id = ? AND guild_id = ?",
                 (user.id, user.guild.id)
             )
             row = await cursor.fetchone()
             return row[0] if row else 0
+        else:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
+                await db.execute("PRAGMA journal_mode=WAL")
+                return await self.get_balance(user, db)
 
-    async def set_balance(self, user: discord.Member, amount: int):
-        if amount < 0:
-            raise ValueError("残高は負の値にはできません。")
-        async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
-            await db.execute(
-                """
-                INSERT INTO bank (user_id, guild_id, balance) 
-                VALUES (?, ?, ?)
-                ON CONFLICT(user_id, guild_id) DO UPDATE SET balance = ?
-                """,
-                (user.id, user.guild.id, amount, amount)
-            )
-            await db.commit()
+    async def set_balance(self, user: discord.Member, amount: int, db_conn=None):
+        if amount < 0: raise ValueError("残高は負の値にはできません。")
+        
+        sql = """
+            INSERT INTO bank (user_id, guild_id, balance) 
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, guild_id) DO UPDATE SET balance = ?
+        """
+        params = (user.id, user.guild.id, amount, amount)
 
-    async def deposit_credits(self, user: discord.Member, amount: int):
-        if amount <= 0:
-            raise ValueError("支給額は0より大きくなければなりません。")
-        async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
-            await db.execute(
-                """
-                INSERT INTO bank (user_id, guild_id, balance) 
-                VALUES (?, ?, ?)
-                ON CONFLICT(user_id, guild_id) DO UPDATE SET balance = balance + ?
-                """,
-                (user.id, user.guild.id, amount, amount)
-            )
-            await db.commit()
+        if db_conn:
+            await db_conn.execute(sql, params)
+        else:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
+                await db.execute("PRAGMA journal_mode=WAL")
+                await db.execute(sql, params)
+                await db.commit()
 
-    async def withdraw_credits(self, user: discord.Member, amount: int):
-        if amount <= 0:
-            raise ValueError("引き落とし額は0より大きくなければなりません。")
-        async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
-            current_bal = await self.get_balance(user)
-            if current_bal < amount:
-                raise ValueError("残高不足です。")
-            await db.execute(
+    async def deposit_credits(self, user: discord.Member, amount: int, db_conn=None):
+        if amount <= 0: raise ValueError("支給額は0より大きくなければなりません。")
+        
+        sql = """
+            INSERT INTO bank (user_id, guild_id, balance) 
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, guild_id) DO UPDATE SET balance = balance + ?
+        """
+        params = (user.id, user.guild.id, amount, amount)
+
+        if db_conn:
+            await db_conn.execute(sql, params)
+        else:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
+                await db.execute("PRAGMA journal_mode=WAL")
+                await db.execute(sql, params)
+                await db.commit()
+
+    async def withdraw_credits(self, user: discord.Member, amount: int, db_conn=None):
+        if amount <= 0: raise ValueError("引き落とし額は0より大きくなければなりません。")
+        
+        # Check balance logic need to use the same connection!
+        # Recursive call will handle opening new conn if needed, but here we must ensure atomicity.
+        
+        if db_conn:
+            current_bal = await self.get_balance(user, db_conn)
+            if current_bal < amount: raise ValueError("残高不足です。")
+            await db_conn.execute(
                 "UPDATE bank SET balance = balance - ? WHERE user_id = ? AND guild_id = ?",
                 (amount, user.id, user.guild.id)
             )
-            await db.commit()
-
-    async def transfer_credits(self, sender: discord.Member, receiver: discord.Member, amount: int):
-        if amount <= 0:
-            raise ValueError("送金額は0より大きくなければなりません。")
-        if sender.id == receiver.id:
-            raise ValueError("自分自身に送金することはできません。")
-
-        async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
-            try:
-                await db.execute("BEGIN TRANSACTION")
-                
-                cursor = await db.execute(
-                    "SELECT balance FROM bank WHERE user_id = ? AND guild_id = ?",
-                    (sender.id, sender.guild.id)
-                )
-                sender_row = await cursor.fetchone()
-                sender_bal = sender_row[0] if sender_row else 0
-
-                if sender_bal < amount:
-                    raise ValueError("残高不足です。")
-
-                await db.execute(
-                    "UPDATE bank SET balance = balance - ? WHERE user_id = ? AND guild_id = ?",
-                    (amount, sender.id, sender.guild.id)
-                )
-
-                await db.execute(
-                    """
-                    INSERT INTO bank (user_id, guild_id, balance) 
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(user_id, guild_id) DO UPDATE SET balance = balance + ?
-                    """,
-                    (receiver.id, receiver.guild.id, amount, amount)
-                )
+        else:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
+                await db.execute("PRAGMA journal_mode=WAL")
+                # We pass 'db' to reuse this connection
+                await self.withdraw_credits(user, amount, db)
                 await db.commit()
-            except Exception as e:
-                await db.rollback()
-                raise e
+
+    async def transfer_credits(self, sender: discord.Member, receiver: discord.Member, amount: int, db_conn=None):
+        if amount <= 0: raise ValueError("送金額は0より大きくなければなりません。")
+        if sender.id == receiver.id: raise ValueError("自分自身に送金することはできません。")
+
+        if db_conn:
+             await self.withdraw_credits(sender, amount, db_conn)
+             await self.deposit_credits(receiver, amount, db_conn)
+        else:
+            async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
+                await db.execute("PRAGMA journal_mode=WAL")
+                await db.execute("BEGIN TRANSACTION")
+                try:
+                    await self.transfer_credits(sender, receiver, amount, db)
+                    await db.commit()
+                except Exception as e:
+                    await db.rollback()
+                    raise e
 
 # -----------------------------------------------------------
 # Bot クラス (Bot Class)

@@ -227,17 +227,20 @@ class BrokerCog(commands.Cog):
         else:
             return 0, f"✅ **確認完了** (新規アイテム)", min_dist
 
-    async def update_market_trends(self, tags):
+    async def update_market_trends(self, tags, db_conn=None):
         """Update saturation for tags on new upload."""
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
+        if db_conn:
             for tag in tags:
-                await db.execute("INSERT OR IGNORE INTO market_trends (tag_name) VALUES (?)", (tag,))
-                await db.execute("""
+                await db_conn.execute("INSERT OR IGNORE INTO market_trends (tag_name) VALUES (?)", (tag,))
+                await db_conn.execute("""
                     UPDATE market_trends 
                     SET saturation = saturation + 1
                     WHERE tag_name = ?
                 """, (tag,))
-            await db.commit()
+        else:
+            async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
+                await self.update_market_trends(tags, db)
+                await db.commit()
 
     async def decay_saturation(self):
         """Called daily to reduce saturation."""
@@ -606,6 +609,7 @@ class BrokerCog(commands.Cog):
             elif score >= 7.0: grade = "A"
             
             # 7. Post to Gallery & DB Insert
+            # 7. Post to Gallery & DB Insert (Atomic)
             item_id = None
             async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
                 cursor = await db.execute(
@@ -616,32 +620,42 @@ class BrokerCog(commands.Cog):
                     (self.bot.user.id, image_url, score, int(final_price * 1.5), img_hash, str(tag_list), grade)
                 )
                 item_id = cursor.lastrowid
-                await db.commit()
-
-            # Create Embed
-            embed = discord.Embed(title=f"📦 新規入荷 (ID: #{item_id})", color=discord.Color.purple())
-            embed.set_image(url=image_url)
-            embed.add_field(name="販売者", value=self.bot.user.mention, inline=True)
-            embed.add_field(name="価格", value=f"💰 {int(final_price * 1.5):,}", inline=True)
-            embed.add_field(name="グレード", value=f"**{grade}** ({score:.2f})", inline=True)
-            
-            if rarity_mult > 1.0:
-                 embed.add_field(name="✨ レアリティボーナス", value=f"x{rarity_mult:.1f} ({', '.join(rare_tags[:3])})", inline=True)
-                 
-            if character_list:
-                chars_str = ", ".join(character_list)
-                embed.add_field(name="👤 キャラクター", value=f"{chars_str} (+{char_bonus:,})", inline=True)
-            if matched_trends:
-                embed.add_field(name="🔥 トレンドボーナス!", value=f"+{trend_bonus:,} ({', '.join(matched_trends)})", inline=False)
-            embed.add_field(name="特徴 (Tags)", value=tags_str[:1000], inline=False)
-            
-            # Post Logic
-            try:
-                await self._post_to_gallery(ctx, embed, temp_path, tags_str, item_id, grade, final_price, tag_list, image_url, img_hash)
-            except Exception as e:
-                await ctx.send(f"❌ 投稿処理中にエラーが発生: {e}")
-                traceback.print_exc()
-                # Rollback DB? (Optional)
+                # Do NOT commit yet
+                
+                # Create Embed
+                embed = discord.Embed(title=f"📦 新規入荷 (ID: #{item_id})", color=discord.Color.purple())
+                embed.set_image(url=image_url)
+                embed.add_field(name="販売者", value=self.bot.user.mention, inline=True)
+                embed.add_field(name="価格", value=f"💰 {int(final_price * 1.5):,}", inline=True)
+                embed.add_field(name="グレード", value=f"**{grade}** ({score:.2f})", inline=True)
+                
+                if rarity_mult > 1.0:
+                     embed.add_field(name="✨ レアリティボーナス", value=f"x{rarity_mult:.1f} ({', '.join(rare_tags[:3])})", inline=True)
+                     
+                if character_list:
+                    chars_str = ", ".join(character_list)
+                    embed.add_field(name="👤 キャラクター", value=f"{chars_str} (+{char_bonus:,})", inline=True)
+                if matched_trends:
+                    embed.add_field(name="🔥 トレンドボーナス!", value=f"+{trend_bonus:,} ({', '.join(matched_trends)})", inline=False)
+                embed.add_field(name="特徴 (Tags)", value=tags_str[:1000], inline=False)
+                
+                # Post Logic & Completion
+                try:
+                    # Pass 'db' to share transaction
+                    await self._post_to_gallery(ctx, embed, temp_path, tags_str, item_id, grade, final_price, tag_list, image_url, img_hash, db_conn=db)
+                    
+                    await db.commit() # Commit all changes (Item, Money, Trends)
+                    
+                except Exception as e:
+                    await ctx.send(f"❌ 投稿処理中にエラーが発生: {e}")
+                    traceback.print_exc()
+                    # Implicit Rollback on exit context manager without commit?
+                    # Actually aiosqlite context manager does commit on exit? 
+                    # No, it *closes*. If we didn't commit, changes are lost? 
+                    # SQLite default is to rollback uncommitted transactions on close. Yes.
+                    # But verifying: aiosqlite context manager for CONNECTION just closes it.
+                    # So uncommitted changes are rolled back. Correct.
+                    return
 
         except Exception as e:
             await ctx.send(f"❌ エラーが発生しました: {e}")
@@ -649,17 +663,18 @@ class BrokerCog(commands.Cog):
         finally:
              if os.path.exists(temp_path): os.remove(temp_path)
 
-    async def _post_to_gallery(self, ctx, embed, temp_path, tags_str, item_id, grade, final_price, tag_list, image_url, img_hash):
+    async def _post_to_gallery(self, ctx, embed, temp_path, tags_str, item_id, grade, final_price, tag_list, image_url, img_hash, db_conn):
         """Handles posting to the appropriate thread or forum."""
         bot_thread = None
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            cursor = await db.execute("SELECT thread_id FROM user_galleries WHERE user_id = ?", (self.bot.user.id,))
-            row = await cursor.fetchone()
-            if row:
-                bot_thread = ctx.guild.get_thread(row[0])
-                if not bot_thread:
-                     try: bot_thread = await ctx.guild.fetch_channel(row[0])
-                     except: pass
+        
+        # 1. Fetch User Gallery (Using shared conn)
+        cursor = await db_conn.execute("SELECT thread_id FROM user_galleries WHERE user_id = ?", (self.bot.user.id,))
+        row = await cursor.fetchone()
+        if row:
+            bot_thread = ctx.guild.get_thread(row[0])
+            if not bot_thread:
+                    try: bot_thread = await ctx.guild.fetch_channel(row[0])
+                    except: pass
 
         from cogs.market import BuyView
         view = BuyView(self.bot)
@@ -677,91 +692,92 @@ class BrokerCog(commands.Cog):
             )
             await ctx.send(f"✅ **密輸成功！(ID: {item_id})**\n公式ギャラリーに入荷しました: {message.jump_url}")
         else:
-             forum = discord.utils.get(ctx.guild.forums, name="闇市ギャラリー")
-             if forum:
-                title = f"[{grade}] {tags_str[:30]}..." if len(tags_str) > 30 else f"[{grade}] {tags_str}"
-                if not title: title = f"[{grade}] 謎の品"
+                forum = discord.utils.get(ctx.guild.forums, name="闇市ギャラリー")
+                if forum:
+                # ... (Same forum logic)
+                    title = f"[{grade}] {tags_str[:30]}..." if len(tags_str) > 30 else f"[{grade}] {tags_str}"
+                    if not title: title = f"[{grade}] 謎の品"
 
-                thread_with_message = await forum.create_thread(
-                    name=title,
-                    content=f"**販売中:** {tags_str[:50]}... (ID: #{item_id})",
-                    embed=embed,
-                    file=discord.File(temp_path, filename="artifact.png"),
-                    view=view
-                )
-                thread_ref = thread_with_message.thread if hasattr(thread_with_message, 'thread') else thread_with_message
-                message = thread_with_message.message 
-                if not message and hasattr(thread_ref, 'starter_message'): message = thread_ref.starter_message
-                
-                await ctx.send(f"✅ **密輸成功！(ID: {item_id})**\n臨時スレッドが作成されました: {thread_ref.mention}")
-             else:
-                await ctx.send("❌ フォーラム「闇市ギャラリー」が見つかりません。`!init_server` を確認してください。")
-                return
+                    thread_with_message = await forum.create_thread(
+                        name=title,
+                        content=f"**販売中:** {tags_str[:50]}... (ID: #{item_id})",
+                        embed=embed,
+                        file=discord.File(temp_path, filename="artifact.png"),
+                        view=view
+                    )
+                    thread_ref = thread_with_message.thread if hasattr(thread_with_message, 'thread') else thread_with_message
+                    message = thread_with_message.message 
+                    if not message and hasattr(thread_ref, 'starter_message'): message = thread_ref.starter_message
+                    
+                    await ctx.send(f"✅ **密輸成功！(ID: {item_id})**\n臨時スレッドが作成されました: {thread_ref.mention}")
+                else:
+                    await ctx.send("❌ フォーラム「闇市ギャラリー」が見つかりません。`!init_server` を確認してください。")
+                    # If we return here, we must raise exception to trigger rollback in caller!
+                    raise Exception("Gallery Forum Not Found")
 
-        # DB Updates & Payment
-        await self.bot.bank.deposit_credits(ctx.author, final_price)
-        await self.update_market_trends(tag_list)
+        # DB Updates & Payment (Atomic)
+        await self.bot.bank.deposit_credits(ctx.author, final_price, db_conn=db_conn)
+        await self.update_market_trends(tag_list, db_conn=db_conn)
         
         # Update Bloom Filter
         self.bloom.add(image_url)
         self.bloom.add(img_hash)
         
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            await db.execute(
-                "UPDATE market_items SET thread_id = ?, message_id = ? WHERE item_id = ?",
-                (thread_ref.id, message.id if message else 0, item_id)
-            )
-            await db.commit()
+        # Final Link Update
+        await db_conn.execute(
+            "UPDATE market_items SET thread_id = ?, message_id = ? WHERE item_id = ?",
+            (thread_ref.id, message.id if message else 0, item_id)
+        )
         
         await ctx.send(f"💰 **報酬受取:** `{final_price:,} Credits` を受け取りました。")
 
     @commands.command(name="join")
     async def join(self, ctx):
         """闇のブローカーとして登録し、個人用ギャラリーを開設します。"""
-        # 1. Check if already joined
+        
         async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
+            # 1. Check if already joined
             cursor = await db.execute("SELECT thread_id FROM user_galleries WHERE user_id = ?", (ctx.author.id,))
             row = await cursor.fetchone()
-        
-        if row:
-            await ctx.send(f"⚠️ 既に登録済みです。ギャラリー: <#{row[0]}>")
-            return
-
-        # 2. Assign Role & Find Forum
-        role = discord.utils.get(ctx.guild.roles, name="密輸業者")
-        forum = discord.utils.get(ctx.guild.forums, name="闇市ギャラリー")
-        
-        if not forum:
-            await ctx.send("❌ フォーラム `闇市ギャラリー` が見つかりません。管理者に連絡してください。")
-            return
-
-        if role:
-            try:
-                await ctx.author.add_roles(role)
-            except discord.Forbidden:
-                await ctx.send("⚠️ ロールの付与に失敗しました(権限不足)。")
-
-        # 3. Create Gallery Thread
-        try:
-            thread_with_message = await forum.create_thread(
-                name=f"[Gallery] {ctx.author.display_name}",
-                content=f"{ctx.author.mention} の個人ギャラリーへようこそ。\nここで獲得した戦利品が展示されます。"
-            )
-            thread = thread_with_message.thread if hasattr(thread_with_message, 'thread') else thread_with_message
             
-            # 4. Save to DB
-            async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
+            if row:
+                await ctx.send(f"⚠️ 既に登録済みです。ギャラリー: <#{row[0]}>")
+                return
+
+            # 2. Assign Role & Find Forum
+            role = discord.utils.get(ctx.guild.roles, name="密輸業者")
+            forum = discord.utils.get(ctx.guild.forums, name="闇市ギャラリー")
+            
+            if not forum:
+                await ctx.send("❌ フォーラム `闇市ギャラリー` が見つかりません。管理者に連絡してください。")
+                return
+
+            if role:
+                try:
+                    await ctx.author.add_roles(role)
+                except discord.Forbidden:
+                    await ctx.send("⚠️ ロールの付与に失敗しました(権限不足)。")
+
+            # 3. Create Gallery Thread
+            try:
+                thread_with_message = await forum.create_thread(
+                    name=f"[Gallery] {ctx.author.display_name}",
+                    content=f"{ctx.author.mention} の個人ギャラリーへようこそ。\nここで獲得した戦利品が展示されます。"
+                )
+                thread = thread_with_message.thread if hasattr(thread_with_message, 'thread') else thread_with_message
+                
+                # 4. Save to DB & Give Starting Funds (Atomic)
                 await db.execute("INSERT INTO user_galleries (user_id, thread_id) VALUES (?, ?)", (ctx.author.id, thread.id))
+                await self.bot.bank.deposit_credits(ctx.author, 3000, db_conn=db)
+                
                 await db.commit()
                 
-            # 5. Give Starting Funds
-            await self.bot.bank.deposit_credits(ctx.author, 3000)
-            
-            await ctx.send(f"🎉 **登録完了！** あなたのギャラリーが開設されました: {thread.mention}\n💰 **開業資金 3,000クレジット** が支給されました！")
+                await ctx.send(f"🎉 **登録完了！** あなたのギャラリーが開設されました: {thread.mention}\n💰 **開業資金 3,000クレジット** が支給されました！")
 
-        except Exception as e:
-            await ctx.send(f"❌ ギャラリー作成に失敗しました: {e}")
-            traceback.print_exc()
+            except Exception as e:
+                await ctx.send(f"❌ ギャラリー作成に失敗しました: {e}")
+                traceback.print_exc()
+                # Rollback handled by context manager (no commit)
 
     @commands.command(name="reset_game")
     @commands.has_permissions(administrator=True)
