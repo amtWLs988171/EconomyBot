@@ -1,5 +1,7 @@
 import math
 import hashlib
+import pickle
+import os
 from typing import Iterator, Union
 
 class BloomFilter:
@@ -118,3 +120,39 @@ class BloomFilter:
             return self.capacity # Return approximate max capacity
             
         return int(-(self.size / self.hash_count) * math.log(1 - bits_set / self.size))
+
+    def save_to_file(self, filepath: str) -> None:
+        """Saves the Bloom Filter state to a file."""
+        data = {
+            'capacity': self.capacity,
+            'error_rate': self.error_rate,
+            'size': self.size,
+            'hash_count': self.hash_count,
+            'bit_array': self.bit_array
+        }
+        with open(filepath, 'wb') as f:
+            pickle.dump(data, f)
+        print(f"Bloom Filter saved to {filepath}")
+
+    @classmethod
+    def load_from_file(cls, filepath: str) -> Union['BloomFilter', None]:
+        """Loads a Bloom Filter from a file."""
+        if not os.path.exists(filepath):
+            return None
+            
+        try:
+            with open(filepath, 'rb') as f:
+                data = pickle.load(f)
+            
+            # Create instance (bypass __init__ logic partially or just re-init)
+            # Re-init is safer to recalculate constants if needed, but we have them.
+            bf = cls(data['capacity'], data['error_rate'])
+            # Verify consistency if needed, but let's trust the file for now
+            bf.size = data['size']
+            bf.hash_count = data['hash_count']
+            bf.bit_array = data['bit_array']
+            print(f"Bloom Filter loaded from {filepath}")
+            return bf
+        except Exception as e:
+            print(f"Failed to load Bloom Filter: {e}")
+            return None

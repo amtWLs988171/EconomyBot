@@ -25,6 +25,10 @@ class BrokerCog(commands.Cog):
         self.tag_data = {} # category: [tags]
         self.load_tag_data()
         
+        # AI Queue System
+        self.ai_queue = asyncio.Queue()
+        self.ai_worker_task = self.bot.loop.create_task(self.ai_worker())
+        
         # Initialize Bloom Filter (Capacity 10000, 0.1% error)
         self.bloom = BloomFilter(capacity=10000, error_rate=0.001)
         self.bot.loop.create_task(self.initialize_bloom_filter())
@@ -33,6 +37,9 @@ class BrokerCog(commands.Cog):
 
     def cog_unload(self):
         self.daily_task_loop.cancel()
+        self.ai_worker_task.cancel()
+        # Save Bloom Filter on unload
+        self.bloom.save_to_file("bloom_filter.bin")
 
     def setup_clients(self):
         try:
@@ -58,11 +65,22 @@ class BrokerCog(commands.Cog):
     async def daily_task_loop(self):
         """Runs daily to update trends (approximated)"""
         await self.update_daily_trends()
+        await self.decay_saturation()
 
     async def initialize_bloom_filter(self):
-        """Loads all existing Image Hashes and URLs into Bloom Filter on startup."""
+        """Loads valid image hashes. Tries file first, then DB."""
         await self.bot.wait_until_ready()
         print("Initializing Bloom Filter...")
+        
+        # Try loading from file
+        loaded_bloom = BloomFilter.load_from_file("bloom_filter.bin")
+        if loaded_bloom:
+            self.bloom = loaded_bloom
+            print(f"Bloom Filter loaded from file. Size eq: {len(self.bloom)}")
+            # Optional: We could load *new* items from DB here if we tracked last_id.
+            # For now, we assume the file is reasonably fresh or we just accept the gap until next save.
+            return
+
         count = 0
         async with aiosqlite.connect(self.bot.bank.db_path) as db:
             # 1. Load URLs (to prevent re-downloading known links)
@@ -74,7 +92,37 @@ class BrokerCog(commands.Cog):
                 if img_hash: self.bloom.add(img_hash)
                 count += 1
                 
-        print(f"Bloom Filter Loaded with {count} items.")
+        print(f"Bloom Filter Rebuilt with {count} items.")
+        self.bloom.save_to_file("bloom_filter.bin")
+
+    async def ai_worker(self):
+        """Worker to process AI requests sequentially."""
+        print("AI Worker Started.")
+        while True:
+            try:
+                # task_type: 'tag' or 'score'
+                # future: asyncio.Future to set result
+                task_type, file_path, future = await self.ai_queue.get()
+                
+                try:
+                    res = None
+                    if task_type == 'tag':
+                        res = await asyncio.to_thread(self._run_predict_sync, self.ai_client_tag, file_path)
+                    elif task_type == 'score':
+                        res = await asyncio.to_thread(self._run_predict_sync, self.ai_client_score, file_path)
+                    
+                    if not future.done():
+                        future.set_result(res)
+                except Exception as e:
+                    if not future.done():
+                        future.set_exception(e)
+                finally:
+                    self.ai_queue.task_done()
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"AI Worker Error: {e}")
 
     @daily_task_loop.before_loop
     async def before_daily_task(self):
@@ -180,35 +228,61 @@ class BrokerCog(commands.Cog):
             return 0, f"✅ **確認完了** (新規アイテム)", min_dist
 
     async def update_market_trends(self, tags):
-        """Update saturation and price for tags (Existing Logic + Daily Trend Bonus?)"""
+        """Update saturation for tags on new upload."""
         async with aiosqlite.connect(self.bot.bank.db_path) as db:
             for tag in tags:
                 await db.execute("INSERT OR IGNORE INTO market_trends (tag_name) VALUES (?)", (tag,))
                 await db.execute("""
                     UPDATE market_trends 
-                    SET saturation = min(saturation + 10, 100),
-                    current_price = max(current_price * 0.98, 10)
+                    SET saturation = saturation + 1
                     WHERE tag_name = ?
                 """, (tag,))
             await db.commit()
 
+    async def decay_saturation(self):
+        """Called daily to reduce saturation."""
+        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+            # Decay by 10% or at least 1
+            await db.execute("""
+                UPDATE market_trends 
+                SET saturation = CAST(saturation * 0.9 AS INTEGER) 
+                WHERE saturation > 0
+            """)
+            await db.commit()
+        print("Daily Saturation Decay Applied.")
+
+        return max(multiplier, 0.1)
+
     async def get_tag_value_modifier(self, tags):
-        # Revised for JSON tag data logic if needed, but keeping simple Saturation Check
+        # Logarithmic Saturation Decay
+        # Multiplier = 1 / log10(saturation + 2)
+        # Base saturation starts at 0.
+        # If saturation is 100 -> log10(102) ~ 2.0 -> Mult ~ 0.5
+        # If saturation is 500 -> log10(502) ~ 2.7 -> Mult ~ 0.37
+        
         multiplier = 1.0
         async with aiosqlite.connect(self.bot.bank.db_path) as db:
             for tag in tags:
                 cursor = await db.execute("SELECT current_price, saturation FROM market_trends WHERE tag_name = ?", (tag,))
                 row = await cursor.fetchone()
                 
-                # Simple Logic: If tag is in our JSON lists, it's "Known", slight bonus?
-                # Keeping existing rarity logic is hard without counts.
-                # Let's just use saturation.
-                
                 if row:
                     price, sat = row
-                    if sat > 80: multiplier -= 0.1 # Over-saturated
-                    else: multiplier += 0.05
+                    # Apply saturation penalty
+                    # Use a weighted average or minimum multiplier?
+                    # Let's use the WORST modifier (the most saturated tag pulls down the whole value)
+                    # Or average? Average feels fairer.
                     
+                    sat_mult = 1.0 / math.log10(max(sat, 0) + 2)
+                    
+                    # Accumulate? Let's average the multipliers of known tags
+                    # But we need to handle "no record" tags as 1.0
+                    # This logic is complex. Simplified:
+                    # Modify the aggregate multiplier by the impact of this tag.
+                    # Let's take the Minimum modifier found.
+                    if sat_mult < multiplier:
+                         multiplier = sat_mult
+
         return max(multiplier, 0.1)
 
     @commands.command(name="trends")
@@ -244,14 +318,15 @@ class BrokerCog(commands.Cog):
             return None, None
 
     async def _run_tagger(self, file_path):
-        """Runs the tagger AI on the file. Returns (tag_list, tags_str, character_list)."""
+        """Runs the tagger AI via Queue. Returns (tag_list, tags_str, character_list)."""
         if not self.ai_client_tag: return [], "", []
+        
+        future = self.bot.loop.create_future()
+        await self.ai_queue.put(('tag', file_path, future))
+        
         try:
-            # Enforce 20s timeout (Increased from 5s)
-            res = await asyncio.wait_for(
-                asyncio.to_thread(self._run_predict_sync, self.ai_client_tag, file_path),
-                timeout=20.0
-            )
+            # Enforce 20s timeout
+            res = await asyncio.wait_for(future, timeout=30.0) # Slightly longer to account for queue wait
 
             # Debug output for verification
             # print(f"DEBUG: Tagger Raw Output Type: {type(res)}")
@@ -319,7 +394,7 @@ class BrokerCog(commands.Cog):
             return tag_list, ", ".join(tag_list), character_list
                 
         except asyncio.TimeoutError:
-            print("Tagging Timeout (20s limit reached)")
+            print("Tagging Timeout (Queue/Process limit reached)")
         except Exception as e:
             print(f"Tagging Error: {e}")
             traceback.print_exc()
@@ -368,14 +443,15 @@ class BrokerCog(commands.Cog):
         return 9999999 # Return high count (low rarity) on failure
 
     async def _run_scorer(self, file_path):
-        """Runs the aesthetic scorer AI."""
+        """Runs the aesthetic scorer AI via Queue."""
         if not self.ai_client_score: return random.uniform(2.0, 5.0)
+        
+        future = self.bot.loop.create_future()
+        await self.ai_queue.put(('score', file_path, future))
+        
         try:
-            # Enforce 20s timeout (Increased from 5s)
-            res = await asyncio.wait_for(
-                asyncio.to_thread(self._run_predict_sync, self.ai_client_score, file_path),
-                timeout=20.0
-            )
+            # Enforce 20s timeout
+            res = await asyncio.wait_for(future, timeout=30.0)
             return float(res)
         except:
             return random.uniform(2.0, 5.0)
@@ -449,6 +525,28 @@ class BrokerCog(commands.Cog):
         value_part = int(base_value_exp * tag_multiplier * rarity_multiplier)
         
         final_price = value_part + trend_bonus + char_bonus
+
+        # --- Stock Market Influence ---
+        # Trigger async stock update
+        stocks_cog = self.bot.get_cog("StocksCog")
+        if stocks_cog:
+            for tag in tag_list:
+                # User Formula:
+                # 1. Supply (Smuggle): -0.5%
+                change_rate = -0.005
+                
+                # 2. Quality (S-Rank >= 9.0): +2.0% Bonus
+                # (Net result: -0.5% + 2.0% = +1.5%)
+                if score >= 9.0: 
+                    change_rate += 0.02
+                
+                # 3. Trend Bonus (If Applicable - Placeholder for now)
+                # if is_trending(tag): change_rate *= 2
+                
+                multiplier = 1.0 + change_rate
+                
+                self.bot.loop.create_task(stocks_cog.update_stock_price(tag, multiplier))
+
         return final_price, trend_bonus, matched_trends, char_bonus, rarity_multiplier, checked_tags
 
     @commands.command(name="smuggle")
@@ -689,6 +787,68 @@ class BrokerCog(commands.Cog):
         
         await ctx.send("🔥 **リセット完了/WIPE COMPLETE**\n全てのデータが削除されました。`!init_server` からやり直してください。")
 
+class InventoryView(discord.ui.View):
+    def __init__(self, ctx, items, per_page=5):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+        self.items = items
+        self.per_page = per_page
+        self.current_page = 0
+        self.max_page = max(0, (len(items) - 1) // per_page)
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.prev_btn.disabled = self.current_page == 0
+        self.next_btn.disabled = self.current_page == self.max_page
+
+    def get_embed(self):
+        start = self.current_page * self.per_page
+        end = start + self.per_page
+        batch = self.items[start:end]
+        
+        embed = discord.Embed(title=f"🎒 {self.ctx.author.display_name}の持ち物 ({self.current_page + 1}/{self.max_page + 1})", color=discord.Color.gold())
+        if not batch:
+             embed.description = "表示するアイテムがありません。"
+             return embed
+             
+        description = ""
+        for item_id, tags, thread_id, score in batch:
+            # Shorten tags
+            tag_summary = tags.split(",")[0] if tags else "不明"
+            # Link to thread
+            thread_link = f"<#{thread_id}>" if thread_id else "不明"
+            description += f"**ID: {item_id}** | {tag_summary} (Score: {score:.1f}) | {thread_link}\n"
+        
+        embed.description = description
+        embed.set_footer(text=f"Total: {len(self.items)} items")
+        return embed
+
+    @discord.ui.button(label="◀️", style=discord.ButtonStyle.blurple)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.ctx.author:
+            await interaction.response.send_message("自分以外のインベントリは操作できません。", ephemeral=True)
+            return
+
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.blurple)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.ctx.author:
+            await interaction.response.send_message("自分以外のインベントリは操作できません。", ephemeral=True)
+            return
+
+        if self.current_page < self.max_page:
+            self.current_page += 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+        else:
+             await interaction.response.defer()
+
     @commands.command(name="inventory", aliases=["bag", "inv"])
     async def inventory(self, ctx):
         """自分が所有している(購入済み)アイテムを表示します。"""
@@ -704,35 +864,40 @@ class BrokerCog(commands.Cog):
             await ctx.send("🎒 **持ち物:** 何も持っていません。ギャラリーで購入するか、密輸してください。")
             return
 
-        embed = discord.Embed(title=f"🎒 {ctx.author.display_name}の持ち物", color=discord.Color.gold())
-        description = ""
-        for item_id, tags, thread_id, score in rows:
-            # Shorten tags
-            tag_summary = tags.split(",")[0] if tags else "不明"
-            # Link to thread
-            thread_link = f"<#{thread_id}>" if thread_id else "不明"
-            description += f"**ID: {item_id}** | {tag_summary} (Score: {score:.1f}) | {thread_link}\n"
-        
-        embed.description = description
-        await ctx.send(embed=embed)
+        view = InventoryView(ctx, rows, per_page=5)
+        await ctx.send(embed=view.get_embed(), view=view)
 
-    @commands.command(name="resell")
-    async def resell(self, ctx, item_id: int, price: int):
-        """所有しているアイテムを再販します。 Usage: !resell [ID] [価格]"""
-        if price < 100:
-            await ctx.send("❌ 価格は100以上に設定してください。")
-            return
+class ResellPriceModal(discord.ui.Modal, title="再販価格の設定"):
+    def __init__(self, bot, item_id):
+        super().__init__()
+        self.bot = bot
+        self.item_id = item_id
+        self.price_input = discord.ui.TextInput(
+            label="価格 (Credits)",
+            placeholder="100以上の整数",
+            min_length=3,
+            max_length=10
+        )
+        self.add_item(self.price_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            price = int(self.price_input.value)
+            if price < 100: raise ValueError
+        except:
+             await interaction.response.send_message("❌ 価格は100以上の整数で入力してください。", ephemeral=True)
+             return
 
         async with aiosqlite.connect(self.bot.bank.db_path) as db:
-            # Check ownership
+            # Re-verify ownership
             cursor = await db.execute("""
                 SELECT thread_id, message_id, tags, aesthetic_score FROM market_items 
                 WHERE item_id = ? AND buyer_id = ? AND status = 'sold'
-            """, (item_id, ctx.author.id))
+            """, (self.item_id, interaction.user.id))
             row = await cursor.fetchone()
             
             if not row:
-                await ctx.send("❌ そのアイテムを所有していないか、IDが間違っています。")
+                await interaction.response.send_message("❌ エラー: アイテムを所有していないか、既に販売中です。", ephemeral=True)
                 return
             
             thread_id, message_id, tags, score = row
@@ -742,56 +907,90 @@ class BrokerCog(commands.Cog):
                 UPDATE market_items 
                 SET status = 'on_sale', price = ?, seller_id = ?, buyer_id = NULL 
                 WHERE item_id = ?
-            """, (price, ctx.author.id, item_id))
+            """, (price, interaction.user.id, self.item_id))
             await db.commit()
             
-        # Update The Message in the Gallery
-        try:
-            thread = ctx.guild.get_thread(thread_id)
-            if not thread:
-                try: thread = await ctx.guild.fetch_channel(thread_id)
-                except:
-                    await ctx.send("⚠️ 元の掲示板が見つかりませんが、DB上では販売中に変更されました。")
-                    return
-
-            # Fetch Message
+            # Update Gallery Message
             try:
-                message = await thread.fetch_message(message_id)
-            except discord.NotFound:
-                await ctx.send("⚠️ 元のメッセージが見つかりません。")
-                return
+                guild = interaction.guild
+                thread = guild.get_thread(thread_id)
+                if not thread:
+                     try: thread = await guild.fetch_channel(thread_id)
+                     except: pass
+                
+                if thread:
+                     try:
+                         msg = await thread.fetch_message(message_id)
+                         
+                         # Edit Embed
+                         embed = msg.embeds[0]
+                         embed.clear_fields()
+                         embed.title = "🔄 再販中 (Resale)"
+                         embed.color = discord.Color.orange()
+                         
+                         tags_str = tags if tags else "None"
+                         grade = "B"
+                         if score >= 9.0: grade = "S"
+                         elif score >= 7.0: grade = "A"
+                         
+                         embed.add_field(name="ID", value=f"**#{self.item_id}**", inline=True)
+                         embed.add_field(name="販売者", value=interaction.user.mention, inline=True)
+                         embed.add_field(name="価格", value=f"💰 {price:,}", inline=True)
+                         embed.add_field(name="グレード", value=f"**{grade}** ({score:.2f})", inline=True)
+                         embed.add_field(name="特徴 (Tags)", value=tags_str, inline=False)
+                         
+                         from cogs.market import BuyView
+                         await msg.edit(content=f"📢 **再販中!** (ID: {self.item_id})", embed=embed, view=BuyView(self.bot))
+                         
+                         await interaction.response.send_message(f"✅ **再販設定完了！** (ID: {self.item_id}, Price: {price:,})\n🔗 {msg.jump_url}")
+                         return
+                     except Exception as e:
+                         print(f"Failed to edit msg: {e}")
+            except Exception as e:
+                print(f"Resell Error: {e}")
+            
+            await interaction.response.send_message(f"✅ **再販設定完了(DBのみ)**: 元のメッセージが見つかりませんでしたが、販売リストには追加されました。")
 
-            # Prepare Edited Embed
-            tags_str = tags if tags else "None"
-            grade = "B"
-            if score >= 9.0: grade = "S"
-            elif score >= 7.0: grade = "A"
+class ResellSelect(discord.ui.Select):
+    def __init__(self, bot, items):
+        options = []
+        for item_id, tags, score in items[:25]: # Max 25 options
+            tag_summary = tags.split(",")[0] if tags else "Unknown"
+            options.append(discord.SelectOption(
+                label=f"ID: {item_id}",
+                description=f"Score: {score:.1f} | {tag_summary}",
+                value=str(item_id)
+            ))
+        super().__init__(placeholder="再販するアイテムを選択してください...", min_values=1, max_values=1, options=options)
+        self.bot = bot
 
-            embed = message.embeds[0] # Reuse existing embed if possible to keep image?
-            # Or rebuild to be safe
-            # Actually, reusing image URL is tricky if we don't have it.
-            # But the embed should have the URL. 
-            # Let's clean up the fields and re-add.
-            
-            embed.clear_fields()
-            embed.title = "🔄 再販中 (Resale)"
-            embed.color = discord.Color.orange()
-            
-            embed.add_field(name="ID", value=f"**#{item_id}**", inline=True)
-            embed.add_field(name="販売者", value=ctx.author.mention, inline=True)
-            embed.add_field(name="価格", value=f"💰 {price:,}", inline=True)
-            embed.add_field(name="グレード", value=f"**{grade}** ({score:.2f})", inline=True)
-            embed.add_field(name="特徴 (Tags)", value=tags_str, inline=False)
-            
-            from cogs.market import BuyView
-            view = BuyView(self.bot)
-            
-            await message.edit(content=f"📢 **再販中!** (ID: {item_id})", embed=embed, view=view)
-            await ctx.send(f"✅ **再販設定完了！**\nギャラリーはこちら: {message.jump_url}")
+    async def callback(self, interaction: discord.Interaction):
+        item_id = int(self.values[0])
+        await interaction.response.send_modal(ResellPriceModal(self.bot, item_id))
 
-        except Exception as e:
-            await ctx.send(f"⚠️ エラーが発生しましたが、DBは更新されました: {e}")
-            traceback.print_exc()
+class ResellSelectView(discord.ui.View):
+    def __init__(self, bot, items):
+        super().__init__(timeout=60)
+        self.add_item(ResellSelect(bot, items))
+
+    @commands.command(name="resell")
+    async def resell(self, ctx):
+        """所有しているアイテムを選択して再販します。"""
+        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+            cursor = await db.execute("""
+                SELECT item_id, tags, aesthetic_score 
+                FROM market_items 
+                WHERE buyer_id = ? AND status = 'sold'
+                ORDER BY item_id DESC
+            """, (ctx.author.id,))
+            rows = await cursor.fetchall()
+            
+        if not rows:
+            await ctx.send("🎒 **持ち物:** 再販できるアイテムを持っていません。")
+            return
+
+        view = ResellSelectView(self.bot, rows)
+        await ctx.send("🔄 **再販するアイテムを選択してください:**", view=view)
 
     @commands.command(name="reset_risk")
     async def reset_risk(self, ctx):

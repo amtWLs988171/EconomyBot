@@ -50,6 +50,11 @@ class BankSystem:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            
+            # Indices for market_items
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_market_status ON market_items(status)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_market_buyer ON market_items(buyer_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_market_hash ON market_items(image_hash)")
 
             # Market Trends table
             await db.execute("""
@@ -87,6 +92,26 @@ class BankSystem:
                 )
             """)
             
+            # Tag Stock Market table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS tag_stocks (
+                    tag_name TEXT PRIMARY KEY,
+                    current_price REAL DEFAULT 100.0,
+                    total_volume INTEGER DEFAULT 0
+                )
+            """)
+
+            # User Stocks table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS user_stocks (
+                    user_id INTEGER,
+                    tag_name TEXT,
+                    amount INTEGER DEFAULT 0,
+                    average_cost REAL DEFAULT 0,
+                    PRIMARY KEY (user_id, tag_name)
+                )
+            """)
+            
             # Migration check
             try:
                 await db.execute("ALTER TABLE market_items ADD COLUMN image_hash TEXT")
@@ -112,6 +137,17 @@ class BankSystem:
                 await db.execute("ALTER TABLE market_items ADD COLUMN buyer_id INTEGER")
             except Exception:
                 pass
+            
+            # Auction Columns
+            try:
+                await db.execute("ALTER TABLE market_items ADD COLUMN auction_end_time TEXT")
+            except Exception: pass
+            try:
+                await db.execute("ALTER TABLE market_items ADD COLUMN current_bid INTEGER DEFAULT 0")
+            except Exception: pass
+            try:
+                await db.execute("ALTER TABLE market_items ADD COLUMN top_bidder_id INTEGER")
+            except Exception: pass
             
             await db.commit()
 
@@ -222,6 +258,7 @@ class EconomyBot(commands.Bot):
             "cogs.bank",
             "cogs.market",
             "cogs.broker",
+            "cogs.stocks",
             "cogs.setup",
         ]
         for extension in self.initial_extensions:

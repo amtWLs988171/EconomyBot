@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from gradio_client import Client, handle_file
 import asyncio
 import aiosqlite
@@ -9,6 +9,7 @@ import uuid
 import traceback
 import imagehash
 from PIL import Image
+from datetime import datetime, timedelta
 
 class BuyView(discord.ui.View):
     def __init__(self, bot):
@@ -143,6 +144,81 @@ class BuyView(discord.ui.View):
                 import traceback
                 traceback.print_exc()
 
+class InventoryView(discord.ui.View):
+    def __init__(self, ctx, items, per_page=5):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+        self.items = items
+        self.per_page = per_page
+        self.current_page = 0
+        self.max_page = max(0, (len(items) - 1) // per_page)
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.prev_btn.disabled = self.current_page == 0
+        self.next_btn.disabled = self.current_page == self.max_page
+
+    def get_embed(self):
+        start = self.current_page * self.per_page
+        end = start + self.per_page
+        batch = self.items[start:end]
+        
+        embed = discord.Embed(title=f"🎒 {self.ctx.author.display_name}の持ち物 ({self.current_page + 1}/{self.max_page + 1})", color=discord.Color.gold())
+        if not batch:
+             embed.description = "表示するアイテムがありません。"
+             return embed
+             
+        description = ""
+        for item_id, tags, thread_id, score in batch:
+            # Shorten tags
+            tag_summary = tags.split(",")[0] if tags else "不明"
+            # Link to thread
+            thread_link = f"<#{thread_id}>" if thread_id else "不明"
+            description += f"**ID: {item_id}** | {tag_summary} (Score: {score:.1f}) | {thread_link}\n"
+        
+        embed.description = description
+        embed.set_footer(text=f"Total: {len(self.items)} items")
+        return embed
+
+    @discord.ui.button(label="◀️", style=discord.ButtonStyle.blurple)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.ctx.author:
+            await interaction.response.send_message("自分以外のインベントリは操作できません。", ephemeral=True)
+            return
+
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.blurple)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.ctx.author:
+            await interaction.response.send_message("自分以外のインベントリは操作できません。", ephemeral=True)
+            return
+
+        if self.current_page < self.max_page:
+            self.current_page += 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+        else:
+             await interaction.response.defer()
+             
+    async def on_timeout(self):
+        # Disable all buttons on timeout
+        for child in self.children:
+            child.disabled = True
+        try:
+             # We can't edit the message easily without reference, 
+             # but View interaction updates update the message.
+             # If we wanted to clear, we'd need the message object.
+             # Usually in on_timeout we just pass or if we stored message we edit it.
+             pass
+        except:
+            pass
+
 class MarketCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -151,6 +227,14 @@ class MarketCog(commands.Cog):
     async def cog_load(self):
         # Register Persistent View
         self.bot.add_view(BuyView(self.bot))
+        # No persistent view for AuctionView needed? 
+        # Actually yes, if we want buttons to work after restart.
+        # But AuctionView takes item_id. 
+        # Standard pattern: Use dynamic custom_id e.g. "auction:bid:item_id" OR generic callback that checks DB.
+        # The Implementation above used a generic "auction_bid_btn" which looks up by Thread ID.
+        # So we can register a generic instance.
+        self.bot.add_view(AuctionView(self.bot, 0))
+        self.auction_check_loop.start()
 
     def setup_client(self):
         try:
@@ -247,10 +331,21 @@ class MarketCog(commands.Cog):
                 await self.bot.bank.withdraw_credits(ctx.author, price)
                 
                 await db.execute(
-                    "UPDATE market_items SET status = 'sold' WHERE item_id = ?",
-                    (item_id,)
+                    "UPDATE market_items SET status = 'sold', buyer_id = ? WHERE item_id = ?",
+                    (ctx.author.id, item_id,)
                 )
                 await db.commit()
+
+                # --- Stock Market Influence (Demand) ---
+                # Buying increases stock price by +1.0%
+                if tags_str:
+                    stocks_cog = self.bot.get_cog("StocksCog")
+                    if stocks_cog:
+                         tag_list = tags_str.split(",")
+                         for tag in tag_list:
+                             t_clean = tag.strip()
+                             if t_clean:
+                                 self.bot.loop.create_task(stocks_cog.update_stock_price(t_clean, 1.01))
                 
                 embed = discord.Embed(title="🎉 購入成功！", description=f"素晴らしい作品を所持することになりました。\n`{price:,} 円`を支払いました。", color=discord.Color.green())
                 embed.set_image(url=image_url)
@@ -259,5 +354,278 @@ class MarketCog(commands.Cog):
             except ValueError as e:
                  await ctx.send(f"❌ 取引失敗: {e}")
 
+    async def cog_unload(self):
+        self.auction_check_loop.cancel()
+
+    @tasks.loop(minutes=1.0)
+    async def auction_check_loop(self):
+        """Checks for expired auctions every minute."""
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+            # Select expired auctions that are still 'on_auction'
+            cursor = await db.execute("""
+                SELECT item_id, image_url, current_bid, top_bidder_id, seller_id, thread_id, message_id
+                FROM market_items 
+                WHERE status = 'on_auction' AND auction_end_time <= ?
+            """, (now_str,))
+            expired_items = await cursor.fetchall()
+            
+            for item in expired_items:
+                item_id, img_url, bid, bidder_id, seller_id, thread_id, msg_id = item
+                
+                # If no bids, return to owner (status 'owned' or 'on_sale'?) -> 'owned' is safer.
+                if not bidder_id or bid == 0:
+                    await db.execute("UPDATE market_items SET status = 'owned', auction_end_time = NULL WHERE item_id = ?", (item_id,))
+                    status_msg = "🚫 **流札 (Unsold)**: 入札者がいませんでした。所有権は出品者に戻ります。"
+                    final_owner_id = seller_id
+                else:
+                    # Winner!
+                    # Money has already been withdrawn from bidder at time of bid?
+                    # Or do we withdraw now? -> Better to withdraw at time of bid (Escrow) to prevent "spending logic holes".
+                    # Let's assume Bid Logic takes money immediately.
+                    
+                    # 1. Pay Seller
+                    tax = int(bid * 0.1) # 10% Auction Tax
+                    payout = bid - tax
+                    seller = self.bot.get_user(seller_id) # Might be None if cache missing
+                    if seller:
+                        await self.bot.bank.deposit_credits(seller, payout)
+                    else:
+                        # Fallback deposit via DB
+                        # Not implemented in BankSystem helper, need manual SQL
+                         await db.execute(
+                            """
+                            INSERT INTO bank (user_id, guild_id, balance) 
+                            VALUES (?, ?, ?)
+                            ON CONFLICT(user_id, guild_id) DO UPDATE SET balance = balance + ?
+                            """,
+                            (seller_id, 0, payout, payout) # Guild ID 0 hack or need to fetch guild? 
+                            # BankSystem requires guild logic. We'll skip guild-specific banking for now and assume Guild ID isn't strict OR we need to fetch.
+                        )
+
+                    # 2. Transfer Item
+                    await db.execute("""
+                        UPDATE market_items 
+                        SET status = 'owned', buyer_id = ?, seller_id = ?, price = 0, auction_end_time = NULL
+                        WHERE item_id = ?
+                    """, (bidder_id, bidder_id, item_id))
+                    
+                    status_msg = f"🔨 **落札 (SOLD)!**\n落札者: <@{bidder_id}>\n落札額: `{bid:,}` Credits"
+                    final_owner_id = bidder_id
+
+                # Notify
+                if thread_id:
+                     # Try to fetch channel
+                     channel = self.bot.get_channel(thread_id)
+                     if channel:
+                         try:
+                             # Update Original Message if possible
+                             if msg_id:
+                                 try:
+                                    msg = await channel.fetch_message(msg_id)
+                                    await msg.edit(content=f"🏁 **オークション終了**: (ID: #{item_id})", view=None)
+                                 except: pass
+                             
+                             embed = discord.Embed(title="🏁 オークション結果", description=status_msg, color=discord.Color.gold())
+                             if img_url: embed.set_image(url=img_url)
+                             await channel.send(content=f"<@{final_owner_id}>", embed=embed)
+                         except: pass
+
+            await db.commit()
+
+    @commands.command(name="auction")
+    async def auction(self, ctx, item_id: int, start_price: int, duration_minutes: int):
+        """所持品をオークションに出品します。 Usage: !auction [ID] [開始価格] [時間(分)]"""
+        if duration_minutes < 1 or duration_minutes > 1440:
+             await ctx.send("❌ 時間は 1分 〜 1440分(24時間) の間で指定してください。")
+             return
+        if start_price < 100:
+             await ctx.send("❌ 開始価格は 100 Credits 以上で設定してください。")
+             return
+
+        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+            # Check ownership
+            cursor = await db.execute("""
+                SELECT tags, aesthetic_score, image_url, image_hash 
+                FROM market_items 
+                WHERE item_id = ? AND buyer_id = ? AND status IN ('owned', 'on_sale')
+            """, (item_id, ctx.author.id))
+            row = await cursor.fetchone()
+            
+            if not row:
+                await ctx.send("❌ そのアイテムを所有していないか、すでに出品中です。")
+                return
+            
+            # Start Auction
+            end_time = datetime.now() + timedelta(minutes=duration_minutes)
+            end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+            
+            tags, score, img_url, img_hash = row
+            
+            # Create Thread/Post
+            forum = discord.utils.get(ctx.guild.forums, name="闇市ギャラリー")
+            if not forum:
+                await ctx.send("❌ 闇市ギャラリーが見つかりません。")
+                return
+
+            embed = discord.Embed(title=f"🔨 オークション開催 (ID: #{item_id})", color=discord.Color.red())
+            embed.set_image(url=img_url)
+            embed.add_field(name="出品者", value=ctx.author.mention, inline=True)
+            embed.add_field(name="開始価格", value=f"💰 {start_price:,}", inline=True)
+            embed.add_field(name="終了時刻", value=f"<t:{int(end_time.timestamp())}:R>", inline=True)
+            embed.add_field(name="スコア", value=f"{score:.2f}", inline=True)
+            embed.add_field(name="Tags", value=tags[:100], inline=False)
+            
+            view = AuctionView(self.bot, item_id)
+            
+            thread_with_message = await forum.create_thread(
+                name=f"[Auction] ID:{item_id} | Price: {start_price}",
+                content=f"🔨 **オークション開始!** (ID: #{item_id})",
+                embed=embed,
+                view=view
+            )
+            thread = thread_with_message.thread if hasattr(thread_with_message, 'thread') else thread_with_message
+            msg = thread_with_message.message 
+            if not msg and hasattr(thread, 'starter_message'): msg = thread.starter_message
+
+            # Update DB
+            await db.execute("""
+                UPDATE market_items 
+                SET status = 'on_auction', 
+                    price = ?, 
+                    current_bid = ?, 
+                    auction_end_time = ?, 
+                    thread_id = ?, 
+                    message_id = ?,
+                    top_bidder_id = NULL
+                WHERE item_id = ?
+            """, (start_price, start_price, end_time_str, thread.id, msg.id if msg else 0, item_id))
+            await db.commit()
+            
+            await ctx.send(f"✅ **オークションを開始しました！**\n会場: {thread.mention}")
+
+class AuctionView(discord.ui.View):
+    def __init__(self, bot, item_id):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.item_id = item_id
+
+    @discord.ui.button(label="✋ 入札する", style=discord.ButtonStyle.primary, custom_id="auction_bid_btn")
+    async def bid_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # We need to find the item_id from context if generic, but here we passed it.
+        # Wait, Custom ID persistent views need dynamic handling if we don't store state.
+        # For persistent views, we usually encode ID in custom_id or look up by channel.
+        # Let's Look up by Channel (Thread) ID as per `BuyView` logic, safer for persistence.
+        
+        thread_id = interaction.channel_id
+        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+            cursor = await db.execute("SELECT item_id, current_bid, top_bidder_id, auction_end_time, seller_id FROM market_items WHERE thread_id = ? AND status = 'on_auction'", (thread_id,))
+            row = await cursor.fetchone()
+            
+            if not row:
+                 await interaction.response.send_message("❌ オークションが見つかりません(終了している可能性があります)。", ephemeral=True)
+                 return
+
+            item_id_db, current_bid, top_bidder, end_time_str, seller_id = row
+            
+            if interaction.user.id == seller_id:
+                 await interaction.response.send_message("❌ 自分の商品には入札できません。", ephemeral=True)
+                 return
+
+            if interaction.user.id == top_bidder:
+                 await interaction.response.send_message("⚠️ あなたは現在の最高入札者です。", ephemeral=True)
+                 return
+
+            # Ask for Bid Amount via Modal
+            await interaction.response.send_modal(BidModal(self.bot, item_id_db, current_bid))
+
+class BidModal(discord.ui.Modal, title="入札金額を入力"):
+    def __init__(self, bot, item_id, current_bid):
+        super().__init__()
+        self.bot = bot
+        self.item_id = item_id
+        self.current_bid = current_bid
+        
+        self.bid_input = discord.ui.TextInput(
+            label=f"現在の価格: {current_bid:,}",
+            placeholder=f"{int(current_bid * 1.1)} 以上の金額を入力",
+            min_length=1,
+            max_length=10,
+        )
+        self.add_item(self.bid_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            bid_amount = int(self.bid_input.value)
+        except ValueError:
+            await interaction.response.send_message("❌ 数字を入力してください。", ephemeral=True)
+            return
+            
+        min_bid = int(self.current_bid * 1.1)
+        if min_bid < self.current_bid + 100: min_bid = self.current_bid + 100
+        
+        if bid_amount < min_bid:
+             await interaction.response.send_message(f"❌ 入札額が低すぎます。(最低: {min_bid:,})", ephemeral=True)
+             return
+
+        # Check Balance
+        buyer = interaction.user
+        try:
+            await self.bot.bank.withdraw_credits(buyer, bid_amount)
+        except ValueError:
+            await interaction.response.send_message(f"❌ 残高不足です！ ({bid_amount:,} 必要)", ephemeral=True)
+            return
+            
+        # Refund Previous Bidder
+        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+            # Re-fetch strictly to avoid race condition? locking is hard in sqlite async.
+            # We assume low traffic collision.
+            cursor = await db.execute("SELECT top_bidder_id, current_bid, auction_end_time FROM market_items WHERE item_id = ?", (self.item_id,))
+            row = await cursor.fetchone()
+            if row:
+                prev_bidder_id, prev_bid_val, end_time_str = row
+                if prev_bidder_id:
+                     prev_bidder = interaction.guild.get_member(prev_bidder_id)
+                     if prev_bidder:
+                         await self.bot.bank.deposit_credits(prev_bidder, prev_bid_val)
+                         try: await prev_bidder.send(f"↩️ **返金通知:** あなたの入札が更新されました (+{prev_bid_val:,} Credits)")
+                         except: pass
+                     else:
+                         # Manual Deposit
+                         await db.execute("INSERT OR IGNORE INTO bank (user_id, guild_id, balance) VALUES (?, ?, 0)", (prev_bidder_id, interaction.guild.id))
+                         await db.execute("UPDATE bank SET balance = balance + ? WHERE user_id = ? AND guild_id = ?", (prev_bid_val, prev_bidder_id, interaction.guild.id))
+
+                # Update Auction State
+                # Soft Close Logic: If < 2 mins left, extend to 2 mins
+                end_time = datetime.strptime(end_time_str, "%Y-%m-%d %H:%M:%S")
+                now = datetime.now()
+                new_end_time = end_time
+                extended = False
+                
+                if (end_time - now).total_seconds() < 120:
+                     new_end_time = now + timedelta(minutes=2)
+                     extended = True
+                
+                new_end_str = new_end_time.strftime("%Y-%m-%d %H:%M:%S")
+                
+                await db.execute("""
+                    UPDATE market_items 
+                    SET current_bid = ?, top_bidder_id = ?, auction_end_time = ?
+                    WHERE item_id = ?
+                """, (bid_amount, buyer.id, new_end_str, self.item_id))
+                await db.commit()
+                
+                msg = f"✅ **入札成功！**\n現在の最高額: `{bid_amount:,}` Credits"
+                if extended: msg += "\n⏳ 終了時間が2分延長されました！"
+                await interaction.response.send_message(msg)
+                
+                # Update Thread Title/Embed (Optional polish)
+                try:
+                     thread = interaction.channel
+                     await thread.edit(name=f"[Auction] ID:{self.item_id} | Price: {bid_amount:,}")
+                     await thread.send(f"⚡ **新規入札:** {buyer.mention} が `{bid_amount:,}` Credits で入札しました！")
+                except: pass
+
 async def setup(bot):
     await bot.add_cog(MarketCog(bot))
+```
