@@ -553,4 +553,4 @@ class BidModal(discord.ui.Modal, title="入札金額を入力"):
 
 async def setup(bot):
     await bot.add_cog(MarketCog(bot))
-```
+
