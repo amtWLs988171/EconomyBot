@@ -62,7 +62,7 @@ class StocksCog(commands.Cog):
     @tasks.loop(hours=1.0)
     async def volatility_loop(self):
         """Applies random market volatility every hour (-5% to +5%)."""
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             cursor = await db.execute("SELECT tag_name, current_price FROM tag_stocks")
             rows = await cursor.fetchall()
             
@@ -80,7 +80,7 @@ class StocksCog(commands.Cog):
         # print("📉 Market Volatility Applied.")
 
     async def get_stock_price(self, tag_name):
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
              cursor = await db.execute("SELECT current_price FROM tag_stocks WHERE tag_name = ?", (tag_name,))
              row = await cursor.fetchone()
              if row: return row[0]
@@ -93,7 +93,7 @@ class StocksCog(commands.Cog):
     async def update_stock_price(self, tag_name, multiplier):
         """Called by other Cogs to influence price. 
         Multiplier example: 1.05 for +5%, 0.99 for -1%."""
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             await db.execute("""
                 INSERT INTO tag_stocks (tag_name, current_price) VALUES (?, 100)
                 ON CONFLICT(tag_name) DO UPDATE SET current_price = max(1.0, current_price * ?)
@@ -101,7 +101,7 @@ class StocksCog(commands.Cog):
             await db.commit()
 
     async def process_buy(self, interaction, tag, amount):
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             current_price = await self.get_stock_price(tag)
             cost = int(current_price * amount)
             
@@ -134,7 +134,7 @@ class StocksCog(commands.Cog):
             await interaction.response.send_message(f"📈 **購入完了:** `{tag}` x{amount}株 (取得単価: {current_price:.1f})")
 
     async def process_sell(self, interaction, tag, amount):
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             cursor = await db.execute("SELECT amount, average_cost FROM user_stocks WHERE user_id = ? AND tag_name = ?", (interaction.user.id, tag))
             row = await cursor.fetchone()
             
@@ -166,7 +166,7 @@ class StocksCog(commands.Cog):
     async def stock(self, ctx, tag_name: str):
         """特定のタグの株価情報を確認します。"""
         price = await self.get_stock_price(tag_name)
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             cursor = await db.execute("SELECT amount, average_cost FROM user_stocks WHERE user_id = ? AND tag_name = ?", (ctx.author.id, tag_name))
             row = await cursor.fetchone()
             
@@ -188,7 +188,7 @@ class StocksCog(commands.Cog):
     @commands.command(name="portfolio")
     async def portfolio(self, ctx):
         """保有株式一覧を表示します。"""
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             cursor = await db.execute("SELECT tag_name, amount, average_cost FROM user_stocks WHERE user_id = ? ORDER BY amount DESC", (ctx.author.id,))
             rows = await cursor.fetchall()
             

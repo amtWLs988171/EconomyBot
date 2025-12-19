@@ -22,7 +22,7 @@ class BuyView(discord.ui.View):
         thread_id = interaction.channel_id
         buyer = interaction.user
         
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             cursor = await db.execute("SELECT item_id, price, seller_id, status FROM market_items WHERE thread_id = ?", (thread_id,))
             row = await cursor.fetchone()
             
@@ -80,7 +80,7 @@ class BuyView(discord.ui.View):
                     img_url = ""
                     # We need image url from somewhere, fetch from DB or message
                     # Let's fetch from DB for logging
-                    async with aiosqlite.connect(self.bot.bank.db_path) as db:
+                    async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
                         c2 = await db.execute("SELECT image_url, tags, aesthetic_score FROM market_items WHERE item_id = ?", (item_id,))
                         r2 = await c2.fetchone()
                         img_url = r2[0] if r2 else ""
@@ -104,7 +104,7 @@ class BuyView(discord.ui.View):
                     await interaction.message.edit(content=f"❌ **完売 (Sold)**", view=None, embed=None)
 
                 # 3. Post to Buyer's Gallery
-                async with aiosqlite.connect(self.bot.bank.db_path) as db:
+                async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
                     cursor = await db.execute("SELECT thread_id FROM user_galleries WHERE user_id = ?", (buyer.id,))
                     row = await cursor.fetchone()
                 
@@ -135,7 +135,7 @@ class BuyView(discord.ui.View):
                 
                 # Update DB with new location
                 if new_thread_id:
-                     async with aiosqlite.connect(self.bot.bank.db_path) as db:
+                     async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
                         await db.execute("UPDATE market_items SET thread_id = ?, message_id = ? WHERE item_id = ?", (new_thread_id, new_msg_id, item_id))
                         await db.commit()
 

@@ -82,7 +82,7 @@ class BrokerCog(commands.Cog):
             return
 
         count = 0
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             # 1. Load URLs (to prevent re-downloading known links)
             cursor = await db.execute("SELECT image_url, image_hash FROM market_items")
             rows = await cursor.fetchall()
@@ -147,7 +147,7 @@ class BrokerCog(commands.Cog):
         
         date_key = datetime.now().strftime("%Y-%m-%d")
         
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             # Clear old trends or just overwrite for the day
             # We store by date_key just in case
             await db.execute("""
@@ -176,7 +176,7 @@ class BrokerCog(commands.Cog):
 
     async def get_current_trends(self):
         date_key = datetime.now().strftime("%Y-%m-%d")
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             cursor = await db.execute("SELECT pose, costume, body FROM daily_trends WHERE date_key = ?", (date_key,))
             row = await cursor.fetchone()
             if row:
@@ -206,7 +206,7 @@ class BrokerCog(commands.Cog):
         if not current_hash:
             return 10, "Unknown Error", 0
         
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             cursor = await db.execute("SELECT image_hash FROM market_items WHERE image_hash IS NOT NULL")
             rows = await cursor.fetchall()
 
@@ -229,7 +229,7 @@ class BrokerCog(commands.Cog):
 
     async def update_market_trends(self, tags):
         """Update saturation for tags on new upload."""
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             for tag in tags:
                 await db.execute("INSERT OR IGNORE INTO market_trends (tag_name) VALUES (?)", (tag,))
                 await db.execute("""
@@ -241,7 +241,7 @@ class BrokerCog(commands.Cog):
 
     async def decay_saturation(self):
         """Called daily to reduce saturation."""
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             # Decay by 10% or at least 1
             await db.execute("""
                 UPDATE market_trends 
@@ -261,7 +261,7 @@ class BrokerCog(commands.Cog):
         # If saturation is 500 -> log10(502) ~ 2.7 -> Mult ~ 0.37
         
         multiplier = 1.0
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             for tag in tags:
                 cursor = await db.execute("SELECT current_price, saturation FROM market_trends WHERE tag_name = ?", (tag,))
                 row = await cursor.fetchone()
@@ -406,7 +406,7 @@ class BrokerCog(commands.Cog):
     async def _fetch_tag_count(self, tag_name):
         """Fetches post count for a tag from Danbooru (with 30-day DB Cache)."""
         # 1. Check DB Cache
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             cursor = await db.execute("SELECT post_count, last_updated FROM tag_metadata WHERE tag_name = ?", (tag_name,))
             row = await cursor.fetchone()
             
@@ -431,7 +431,7 @@ class BrokerCog(commands.Cog):
                             
                             # Update Cache
                             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            async with aiosqlite.connect(self.bot.bank.db_path) as db:
+                            async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
                                 await db.execute(
                                     "INSERT OR REPLACE INTO tag_metadata (tag_name, post_count, last_updated) VALUES (?, ?, ?)",
                                     (tag_name, post_count, now_str)
@@ -607,7 +607,7 @@ class BrokerCog(commands.Cog):
             
             # 7. Post to Gallery & DB Insert
             item_id = None
-            async with aiosqlite.connect(self.bot.bank.db_path) as db:
+            async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
                 cursor = await db.execute(
                     """
                     INSERT INTO market_items (seller_id, image_url, aesthetic_score, price, status, image_hash, tags, grade, thread_id, message_id)
@@ -652,7 +652,7 @@ class BrokerCog(commands.Cog):
     async def _post_to_gallery(self, ctx, embed, temp_path, tags_str, item_id, grade, final_price, tag_list, image_url, img_hash):
         """Handles posting to the appropriate thread or forum."""
         bot_thread = None
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             cursor = await db.execute("SELECT thread_id FROM user_galleries WHERE user_id = ?", (self.bot.user.id,))
             row = await cursor.fetchone()
             if row:
@@ -706,7 +706,7 @@ class BrokerCog(commands.Cog):
         self.bloom.add(image_url)
         self.bloom.add(img_hash)
         
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             await db.execute(
                 "UPDATE market_items SET thread_id = ?, message_id = ? WHERE item_id = ?",
                 (thread_ref.id, message.id if message else 0, item_id)
@@ -719,7 +719,7 @@ class BrokerCog(commands.Cog):
     async def join(self, ctx):
         """闇のブローカーとして登録し、個人用ギャラリーを開設します。"""
         # 1. Check if already joined
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             cursor = await db.execute("SELECT thread_id FROM user_galleries WHERE user_id = ?", (ctx.author.id,))
             row = await cursor.fetchone()
         
@@ -750,7 +750,7 @@ class BrokerCog(commands.Cog):
             thread = thread_with_message.thread if hasattr(thread_with_message, 'thread') else thread_with_message
             
             # 4. Save to DB
-            async with aiosqlite.connect(self.bot.bank.db_path) as db:
+            async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
                 await db.execute("INSERT INTO user_galleries (user_id, thread_id) VALUES (?, ?)", (ctx.author.id, thread.id))
                 await db.commit()
                 
@@ -778,7 +778,7 @@ class BrokerCog(commands.Cog):
             await ctx.send("❌ タイムアウトしました。リセットはキャンセルされました。")
             return
 
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             tables = ["bank", "market_items", "market_trends", "user_galleries"]
             for table in tables:
                 try:
@@ -854,7 +854,7 @@ class InventoryView(discord.ui.View):
     @commands.command(name="inventory", aliases=["bag", "inv"])
     async def inventory(self, ctx):
         """自分が所有している(購入済み)アイテムを表示します。"""
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             cursor = await db.execute("""
                 SELECT item_id, tags, thread_id, aesthetic_score 
                 FROM market_items 
@@ -890,7 +890,7 @@ class ResellPriceModal(discord.ui.Modal, title="再販価格の設定"):
              await interaction.response.send_message("❌ 価格は100以上の整数で入力してください。", ephemeral=True)
              return
 
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             # Re-verify ownership
             cursor = await db.execute("""
                 SELECT thread_id, message_id, tags, aesthetic_score FROM market_items 
@@ -978,7 +978,7 @@ class ResellSelectView(discord.ui.View):
     @commands.command(name="resell")
     async def resell(self, ctx):
         """所有しているアイテムを選択して再販します。"""
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             cursor = await db.execute("""
                 SELECT item_id, tags, aesthetic_score 
                 FROM market_items 
@@ -997,7 +997,7 @@ class ResellSelectView(discord.ui.View):
     @commands.command(name="reset_risk")
     async def reset_risk(self, ctx):
         """(Debug) Clears all image hashes from the database to reset pHash risk."""
-        async with aiosqlite.connect(self.bot.bank.db_path) as db:
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
             await db.execute("UPDATE market_items SET image_hash = NULL")
             await db.commit()
         await ctx.send("🔄 **記憶消去完了。** 当局は押収品に関するデータを失いました。\nこれで再び低リスクで密輸できます！")
