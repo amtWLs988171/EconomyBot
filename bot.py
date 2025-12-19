@@ -22,7 +22,7 @@ class BankSystem:
         self.db_path = db_path
 
     async def initialize(self):
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
             # Bank table
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS bank (
@@ -152,7 +152,7 @@ class BankSystem:
             await db.commit()
 
     async def get_balance(self, user: discord.Member) -> int:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
             cursor = await db.execute(
                 "SELECT balance FROM bank WHERE user_id = ? AND guild_id = ?",
                 (user.id, user.guild.id)
@@ -163,7 +163,7 @@ class BankSystem:
     async def set_balance(self, user: discord.Member, amount: int):
         if amount < 0:
             raise ValueError("残高は負の値にはできません。")
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
             await db.execute(
                 """
                 INSERT INTO bank (user_id, guild_id, balance) 
@@ -177,7 +177,7 @@ class BankSystem:
     async def deposit_credits(self, user: discord.Member, amount: int):
         if amount <= 0:
             raise ValueError("支給額は0より大きくなければなりません。")
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
             await db.execute(
                 """
                 INSERT INTO bank (user_id, guild_id, balance) 
@@ -191,7 +191,7 @@ class BankSystem:
     async def withdraw_credits(self, user: discord.Member, amount: int):
         if amount <= 0:
             raise ValueError("引き落とし額は0より大きくなければなりません。")
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
             current_bal = await self.get_balance(user)
             if current_bal < amount:
                 raise ValueError("残高不足です。")
@@ -207,7 +207,7 @@ class BankSystem:
         if sender.id == receiver.id:
             raise ValueError("自分自身に送金することはできません。")
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(self.db_path, timeout=60.0) as db:
             try:
                 await db.execute("BEGIN TRANSACTION")
                 
