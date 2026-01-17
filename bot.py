@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 # -----------------------------------------------------------
 # 設定 (Configuration)
 # -----------------------------------------------------------
-load_dotenv()
+load_dotenv(override=True)
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -74,24 +74,10 @@ class BankSystem:
                 )
             """)
             
-            # Daily Trends table
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS daily_trends (
-                    date_key TEXT PRIMARY KEY,
-                    pose TEXT,
-                    costume TEXT,
-                    body TEXT
-                )
-            """)
+            # Daily Trends table removed
+
             
-            # Tag Metadata table (Danbooru Cache)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS tag_metadata (
-                    tag_name TEXT PRIMARY KEY,
-                    post_count INTEGER,
-                    last_updated TIMESTAMP
-                )
-            """)
+            # Tag Metadata table removed
             
             # Tag Stock Market table
             await db.execute("""
@@ -148,6 +134,10 @@ class BankSystem:
             except Exception: pass
             try:
                 await db.execute("ALTER TABLE market_items ADD COLUMN top_bidder_id INTEGER")
+            except Exception: pass
+            
+            try:
+                await db.execute("ALTER TABLE market_items ADD COLUMN is_locked BOOLEAN DEFAULT 0")
             except Exception: pass
             
             await db.commit()
@@ -258,7 +248,7 @@ class EconomyBot(commands.Bot):
             "cogs.bank",
             "cogs.market",
             "cogs.broker",
-            "cogs.stocks",
+
             "cogs.setup",
         ]
         for extension in self.initial_extensions:

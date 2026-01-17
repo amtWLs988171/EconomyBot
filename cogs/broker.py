@@ -14,7 +14,7 @@ import csv
 import json
 import math
 from datetime import datetime, time, timedelta
-from utils.bloom_filter import BloomFilter
+# from utils.bloom_filter import BloomFilter # Removed
 
 class InventoryView(discord.ui.View):
     def __init__(self, ctx, items, per_page=5):
@@ -189,16 +189,17 @@ class BrokerCog(commands.Cog):
         self.ai_client_score = None
         self.ai_client_tag = None
         self.setup_clients()
-        self.tag_data = {} # category: [tags]
-        self.load_tag_data()
+        self.setup_clients()
+        # self.tag_data = {} # Removed
+        # self.load_tag_data() # Removed
         
         # AI Queue System
         self.ai_queue = asyncio.Queue()
         self.ai_worker_task = self.bot.loop.create_task(self.ai_worker())
         
-        # Initialize Bloom Filter (Capacity 10000, 0.1% error)
-        self.bloom = BloomFilter(capacity=10000, error_rate=0.001)
-        self.bot.loop.create_task(self.initialize_bloom_filter())
+        # BloomFilter removed
+        # self.bloom = BloomFilter(capacity=10000, error_rate=0.001)
+        # self.bot.loop.create_task(self.initialize_bloom_filter())
         
         self.daily_task_loop.start()
 
@@ -206,7 +207,7 @@ class BrokerCog(commands.Cog):
         self.daily_task_loop.cancel()
         self.ai_worker_task.cancel()
         # Save Bloom Filter on unload
-        self.bloom.save_to_file("bloom_filter.bin")
+        # self.bloom.save_to_file("bloom_filter.bin") # Removed
 
     def setup_clients(self):
         try:
@@ -219,48 +220,15 @@ class BrokerCog(commands.Cog):
             self.ai_client_score = None
             self.ai_client_tag = None
 
-    def load_tag_data(self):
-        try:
-            with open('tags.json', 'r', encoding='utf-8') as f:
-                self.tag_data = json.load(f)
-            print(f"Loaded Tags: {len(self.tag_data)} categories.")
-        except Exception as e:
-            print(f"Failed to load tag data: {e}")
-            self.tag_data = {}
+    # load_tag_data Removed
 
     @tasks.loop(hours=24)
     async def daily_task_loop(self):
-        """Runs daily to update trends (approximated)"""
-        await self.update_daily_trends()
+        """Runs daily to decay saturation (economy maintenance)"""
+        # await self.update_daily_trends() # Removed
         await self.decay_saturation()
 
-    async def initialize_bloom_filter(self):
-        """Loads valid image hashes. Tries file first, then DB."""
-        await self.bot.wait_until_ready()
-        print("Initializing Bloom Filter...")
-        
-        # Try loading from file
-        loaded_bloom = BloomFilter.load_from_file("bloom_filter.bin")
-        if loaded_bloom:
-            self.bloom = loaded_bloom
-            print(f"Bloom Filter loaded from file. Size eq: {len(self.bloom)}")
-            # Optional: We could load *new* items from DB here if we tracked last_id.
-            # For now, we assume the file is reasonably fresh or we just accept the gap until next save.
-            return
-
-        count = 0
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            # 1. Load URLs (to prevent re-downloading known links)
-            cursor = await db.execute("SELECT image_url, image_hash FROM market_items")
-            rows = await cursor.fetchall()
-            
-            for url, img_hash in rows:
-                if url: self.bloom.add(url)
-                if img_hash: self.bloom.add(img_hash)
-                count += 1
-                
-        print(f"Bloom Filter Rebuilt with {count} items.")
-        self.bloom.save_to_file("bloom_filter.bin")
+    # initialize_bloom_filter Removed
 
     async def ai_worker(self):
         """Worker to process AI requests sequentially."""
@@ -303,55 +271,9 @@ class BrokerCog(commands.Cog):
         print(f"Next Daily Trend Update: {target}")
         await asyncio.sleep((target - now).total_seconds())
 
-    async def update_daily_trends(self):
-        if not self.tag_data: return
-        
-        # Pick 1 from each category
-        today_trends = {}
-        for category, tags in self.tag_data.items():
-            if tags:
-                today_trends[category] = random.choice(tags)
-        
-        date_key = datetime.now().strftime("%Y-%m-%d")
-        
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            # Clear old trends or just overwrite for the day
-            # We store by date_key just in case
-            await db.execute("""
-                INSERT OR REPLACE INTO daily_trends (date_key, pose, costume, body)
-                VALUES (?, ?, ?, ?)
-            """, (date_key, today_trends.get('pose'), today_trends.get('costume'), today_trends.get('body')))
-            await db.commit()
-        
-        print(f"Updated Daily Trends for {date_key}: {today_trends}")
-        
-        # Notify "トレンド" channel in all guilds
-        embed = discord.Embed(title=f"📅 本日のトレンド ({date_key})", color=discord.Color.gold())
-        embed.description = "市場調査の結果、以下の属性が高騰しています！\nこれらの要素を含む画像を密輸するとボーナスがつきます。"
-        embed.add_field(name="🤸 ポーズ", value=f"`{today_trends.get('pose')}`", inline=True)
-        embed.add_field(name="👗 衣装", value=f"`{today_trends.get('costume')}`", inline=True)
-        embed.add_field(name="👀 特徴", value=f"`{today_trends.get('body')}`", inline=True)
-        embed.set_footer(text="毎日AM6:00更新 | 闇市運営委員会")
+    # update_daily_trends Removed
 
-        for guild in self.bot.guilds:
-            channel = discord.utils.get(guild.text_channels, name="トレンド")
-            if channel:
-                try:
-                    await channel.send(embed=embed)
-                except Exception as e:
-                    print(f"Failed to send trend update to guild {guild.name}: {e}")
-
-    async def get_current_trends(self):
-        date_key = datetime.now().strftime("%Y-%m-%d")
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            cursor = await db.execute("SELECT pose, costume, body FROM daily_trends WHERE date_key = ?", (date_key,))
-            row = await cursor.fetchone()
-            if row:
-                return {'pose': row[0], 'costume': row[1], 'body': row[2]}
-            else:
-                # Force update if missing
-                await self.update_daily_trends()
-                return await self.get_current_trends()
+    # get_current_trends Removed
 
     def _run_predict_sync(self, client, file_path):
         """Run prediction in a separate thread"""
@@ -457,20 +379,7 @@ class BrokerCog(commands.Cog):
 
 
 
-    @commands.command(name="trends")
-    async def trends(self, ctx):
-        """(Beta) 今日の流行トレンドを表示します。"""
-        trends = await self.get_current_trends()
-        if not trends:
-            await ctx.send("📅 今日のトレンドはまだ発表されていません。")
-            return
-            
-        embed = discord.Embed(title="📈 本日の闇市トレンド (Daily Trends)", description="以下の要素を含む品は高値で取引されます。", color=discord.Color.magenta())
-        embed.add_field(name="💃 姿勢 (Pose)", value=f"`{trends.get('pose', 'None')}`", inline=True)
-        embed.add_field(name="👗 衣装 (Costume)", value=f"`{trends.get('costume', 'None')}`", inline=True)
-        embed.add_field(name="👀 特徴 (Body)", value=f"`{trends.get('body', 'None')}`", inline=True)
-        embed.set_footer(text="毎日 朝6:00 更新")
-        await ctx.send(embed=embed)
+    # trends command Removed
 
     async def _download_and_hash(self, url):
         """Downloads image from URL and calculates pHash."""
@@ -573,46 +482,7 @@ class BrokerCog(commands.Cog):
             
         return [], "timeout_fallback", []
 
-    async def _fetch_tag_count(self, tag_name):
-        """Fetches post count for a tag from Danbooru (with 30-day DB Cache)."""
-        # 1. Check DB Cache
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            cursor = await db.execute("SELECT post_count, last_updated FROM tag_metadata WHERE tag_name = ?", (tag_name,))
-            row = await cursor.fetchone()
-            
-            if row:
-                count, last_updated_str = row
-                last_updated = datetime.strptime(last_updated_str, "%Y-%m-%d %H:%M:%S")
-                if datetime.now() - last_updated < timedelta(days=30):
-                    return count
-
-        # 2. Fetch from API
-        try:
-            print(f"Fetching count for tag: {tag_name}")
-            async with aiohttp.ClientSession() as session:
-                # Danbooru API: tags.json?search[name]=tag_name
-                url = f"https://danbooru.donmai.us/tags.json"
-                params = {"search[name]": tag_name}
-                async with session.get(url, params=params) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data and isinstance(data, list):
-                            post_count = data[0].get('post_count', 0)
-                            
-                            # Update Cache
-                            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-                                await db.execute(
-                                    "INSERT OR REPLACE INTO tag_metadata (tag_name, post_count, last_updated) VALUES (?, ?, ?)",
-                                    (tag_name, post_count, now_str)
-                                )
-                                await db.commit()
-                            
-                            return post_count
-        except Exception as e:
-            print(f"Danbooru API Error ({tag_name}): {e}")
-            
-        return 9999999 # Return high count (low rarity) on failure
+    # _fetch_tag_count (Danbooru) Removed
 
     async def _run_scorer(self, file_path):
         """Runs the aesthetic scorer AI via Queue."""
@@ -633,97 +503,88 @@ class BrokerCog(commands.Cog):
         tag_multiplier = await self.get_tag_value_modifier(tag_list)
         base_price = 1000
         
-        trends = await self.get_current_trends()
+        # trends = await self.get_current_trends() # Removed
         trend_bonus = 0
         matched_trends = []
         
-        if trends:
-            for cat, val in trends.items():
-                if val and val in tag_list:
-                    trend_bonus += 5000 
-                    matched_trends.append(val)
+        # Trend logic removed
         
         # Character Bonus
         char_bonus = 0
         if character_list:
             char_bonus = 2000 * len(character_list)
 
-        # --- Rarity Bonus (Danbooru) ---
+        # --- Rarity Bonus (Danbooru) Removed ---
         rarity_multiplier = 1.0
-        
-        # Filter commonly used tags to avoid dilution
-        ignored_tags = {'1girl', 'solo', 'long_hair', 'breasts', 'looking_at_viewer', 'smile', 'blush', 'short_hair', 'open_mouth'}
-        candidate_tags = [t for t in tag_list if t not in ignored_tags and t not in character_list] # Chars have their own bonus
-        
-        # We need to fetch counts. This can be slow if not cached, so limit to top 5 candidates?
-        # Let's take first 5 from "tag_list" which is sorted by confidence usually? 
-        # Actually tag_list is sorted by confidence.
-        # Let's check top 5 confident tags.
-        check_limit = 5
-        checked_tags = []
-        rarity_scores = []
-        
-        for tag in candidate_tags[:check_limit]:
-             count = await self._fetch_tag_count(tag)
-             # Formula: Multiplier boost based on rarity.
-             # < 1000: x3.0
-             # < 5000: x2.0
-             # < 20000: x1.5
-             # < 50000: x1.2
-             # Else: x1.0
-             
-             mult = 1.0
-             if count < 1000: mult = 3.0
-             elif count < 5000: mult = 2.0
-             elif count < 20000: mult = 1.5
-             elif count < 50000: mult = 1.2
-             
-             rarity_scores.append(mult)
-             if mult > 1.0:
-                 checked_tags.append(f"{tag}({count})")
-
-        if rarity_scores:
-            # Take the MAX rarity found (reward the rarest feature), or average?
-            # Max is better for "Jackpot" feeling.
-            rarity_multiplier = max(rarity_scores)
+        checked_tags = [] # No longer used
 
         # Ensure score is within bounds
         score = max(0.0, min(10.0, score))
         
-        # Final Algo: (Base Exponential) * SaturationMult * RarityMult + Trend + Char
         # New Formula: 1000 * (score^2)
         base_value_exp = int(1000 * (score ** 2))
         
-        value_part = int(base_value_exp * tag_multiplier * rarity_multiplier)
+        # Simple Price Calculation
+        final_price = base_value_exp + char_bonus
         
-        final_price = value_part + trend_bonus + char_bonus
-
-        # --- Stock Market Influence ---
-        # Trigger async stock update
-        stocks_cog = self.bot.get_cog("StocksCog")
-        if stocks_cog:
-            for tag in tag_list:
-                # User Formula:
-                # 1. Supply (Smuggle): -0.5%
-                change_rate = -0.005
-                
-                # 2. Quality (S-Rank >= 9.0): +2.0% Bonus
-                # (Net result: -0.5% + 2.0% = +1.5%)
-                if score >= 9.0: 
-                    change_rate += 0.02
-                
-                # 3. Trend Bonus (If Applicable - Placeholder for now)
-                # if is_trending(tag): change_rate *= 2
-                
-                multiplier = 1.0 + change_rate
-                
-                self.bot.loop.create_task(stocks_cog.update_stock_price(tag, multiplier))
+        # Stocks Logic Removed
 
         return final_price, trend_bonus, matched_trends, char_bonus, rarity_multiplier, checked_tags
+
+
+
+    @commands.command(name="join")
+    async def join(self, ctx):
+        """闇市の隠れ家を作成します。"""
+        try:
+            guild = ctx.guild
+            cat_name = "🕵️ Hideouts"
+            category = discord.utils.get(guild.categories, name=cat_name)
+            
+            if not category:
+                # Create Private Category
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                    guild.me: discord.PermissionOverwrite(read_messages=True)
+                }
+                category = await guild.create_category(cat_name, overwrites=overwrites)
+            
+            # Check existing channel (Use ID for safety)
+            # Sanitized Name: hideout-username-1234
+            safe_name = "".join(c for c in ctx.author.name.lower() if c.isalnum() or c in "-_")
+            ch_name = f"hideout-{safe_name}-{ctx.author.id}"
+            
+            # Also check simpler name for backward compatibility if we want, but let's stick to new standard
+            existing = discord.utils.get(category.text_channels, name=ch_name)
+            
+            if existing:
+                await ctx.send(f"⚠️ あなたの隠れ家は既に存在します: {existing.mention}")
+                return
+                
+            # Create Channel
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True, embed_links=True),
+                guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
+            }
+            
+            channel = await guild.create_text_channel(ch_name, category=category, overwrites=overwrites)
+            await ctx.send(f"✅ 隠れ家を用意しました... こちらへどうぞ: {channel.mention}")
+            
+            await channel.send(f"🕵️ **ようこそ、{ctx.author.mention}。**\nここはあなただけの隠れ家です。\n`!smuggle` で密輸品を鑑定・売却しましょう。\n(誰にも見られることはありません...)")
+
+        except Exception as e:
+            await ctx.send(f"❌ 隠れ家の作成に失敗しました: {e}")
+            traceback.print_exc()
 
     @commands.command(name="smuggle")
     async def smuggle(self, ctx):
         """The main loop: Upload -> Risk -> Gamble -> Appraise -> Sell"""
+        # 1. Restriction Check
+        if not ctx.channel.name.startswith("hideout-"):
+            await ctx.send("🚫 **密輸は「隠れ家」で行ってください。**\n`!join` で隠れ家を作成できます。")
+            return
+
         if not ctx.message.attachments:
             await ctx.send("📦 **密輸品(画像)を添付してください！**")
             return
@@ -743,13 +604,9 @@ class BrokerCog(commands.Cog):
             return
 
         try:
-            # 2. Bloom Filter Check (Fast Fail)
-            # We check the Bloom Filter FIRST to avoid expensive DB queries for known duplicates.
-            # If check returns True, it's LIKELY a duplicate (proceed to DB to confirm).
-            # If False, it is DEFINITELY unique.
-            if self.bloom.check(img_hash):
-                print(f"Bloom Filter Warning: Hash {img_hash} might exist.")
-            
+            # 2. Bloom Filter Check Removed
+            # if self.bloom.check(img_hash): ...
+
             # 3. DB Duplicate Check (Strict & Reliable)
             # Even if Bloom said "No", we still check DB for *similar* images (hamming distance),
             # which Bloom Filter cannot do.
@@ -898,8 +755,8 @@ class BrokerCog(commands.Cog):
         
         await ctx.send(f"💰 **報酬受取:** `{final_price:,} Credits` を受け取りました。")
 
-    @commands.command(name="join")
-    async def join(self, ctx):
+    @commands.command(name="register")
+    async def register(self, ctx):
         """闇のブローカーとして登録し、個人用ギャラリーを開設します。"""
         
         async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
@@ -945,33 +802,6 @@ class BrokerCog(commands.Cog):
                 await ctx.send(f"❌ ギャラリー作成に失敗しました: {e}")
                 traceback.print_exc()
                 # Rollback handled by context manager (no commit)
-
-    @commands.command(name="reset_game")
-    @commands.has_permissions(administrator=True)
-    async def reset_game(self, ctx):
-        """(Debug) データベースを全消去し、ゲームをリセットします。"""
-        await ctx.send("⚠️ **警告:** すべてのユーザーデータ、アイテム、ギャラリー情報が削除されます。よろしいですか？(yes/no)")
-        
-        def check(m):
-            return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == "yes"
-
-        try:
-            await self.bot.wait_for('message', check=check, timeout=30.0)
-        except asyncio.TimeoutError:
-            await ctx.send("❌ タイムアウトしました。リセットはキャンセルされました。")
-            return
-
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            tables = ["bank", "market_items", "market_trends", "user_galleries"]
-            for table in tables:
-                try:
-                    await db.execute(f"DELETE FROM {table}")
-                except Exception as e:
-                    print(f"Failed to clear {table}: {e}")
-            await db.commit()
-        
-        await ctx.send("🔥 **リセット完了/WIPE COMPLETE**\n全てのデータが削除されました。`!init_server` からやり直してください。")
-
 
 
     @commands.command(name="inventory", aliases=["bag", "inv"])
