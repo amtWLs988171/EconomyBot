@@ -7,4 +7,5 @@ services:
       - .:/app
     env_file:
       - .env  # .env 파일을 읽어서 토큰 등을 전달합니다.
+    command: ["sleep", "infinity"]
     restart: unless-stopped
