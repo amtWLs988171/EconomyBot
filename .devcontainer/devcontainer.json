@@ -1,0 +1,14 @@
+{
+	"name": "Economy Bot Dev",
+	"dockerComposeFile": "../docker-compose.yml",
+	"service": "bot",
+	"workspaceFolder": "/app",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python"
+			]
+		}
+	},
+	"remoteUser": "root"
+}

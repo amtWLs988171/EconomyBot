@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    volumes:
+      # 현재 폴더(.)를 컨테이너의 /app과 동기화합니다.
+      # 코드를 고치면 컨테이너 안에서도 바로 바뀝니다!
+      - .:/app
+    env_file:
+      - .env  # .env 파일을 읽어서 토큰 등을 전달합니다.
+    restart: unless-stopped
