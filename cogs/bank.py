@@ -18,8 +18,8 @@ class BankCog(commands.Cog):
         bal = await self.bot.bank.get_balance(member)
         
         embed = discord.Embed(color=discord.Color.green())
-        embed.set_author(name=f"{member.display_name}様の財布", icon_url=member.display_avatar.url)
-        embed.add_field(name="保有金額", value=f"{bal:,} 円")
+        embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+        embed.add_field(name="残高", value=f"{bal:,} 円")
         
         await ctx.send(embed=embed)
 
@@ -29,7 +29,7 @@ class BankCog(commands.Cog):
         try:
             await self.bot.bank.transfer_credits(ctx.author, receiver, amount)
             embed = discord.Embed(title="送金完了", color=discord.Color.blue())
-            embed.description = f"**{ctx.author.display_name}**様が **{receiver.display_name}**様に\n`{amount:,} 円`を送金しました。"
+            embed.description = f"**{ctx.author.display_name}** から **{receiver.display_name}** へ\n`{amount:,} 円`を送金しました。"
             await ctx.send(embed=embed)
         except ValueError as e:
             await ctx.send(f"❌ {str(e)}")
@@ -59,14 +59,14 @@ class BankCog(commands.Cog):
             diff = now - self.last_daily[user_id]
             if diff < 86400:
                 hours = int((86400 - diff) // 3600)
-                await ctx.send(f"📅 今日はすでに出席済みです。(残り {hours}時間)")
+                await ctx.send(f"📅 すでに出席済みです。(残り {hours}時間)")
                 return
 
         amount = 5000
         await self.bot.bank.deposit_credits(ctx.author, amount)
         self.last_daily[user_id] = now
         
-        await ctx.send(f"📅 出席チェック完了！ `{amount:,} 円`を受け取りました。")
+        await ctx.send(f"📅 ログボ受取完了: `{amount:,} 円`")
 
 async def setup(bot):
     await bot.add_cog(BankCog(bot))

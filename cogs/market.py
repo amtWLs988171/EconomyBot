@@ -16,14 +16,15 @@ class BuyView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
 
-    @discord.ui.button(label="💸 今すぐ購入", style=discord.ButtonStyle.green, custom_id="shadow_broker:buy_btn")
+    @discord.ui.button(label="購入", style=discord.ButtonStyle.green, custom_id="shadow_broker:buy_btn")
     async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 1. Identify Item by Thread ID
-        thread_id = interaction.channel_id
+        # 1. Identify Item by Message ID (Unique to the specific button press)
+        # using message_id instead of channel_id allows multiple items in one thread.
+        message_id = interaction.message.id
         buyer = interaction.user
         
         async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            cursor = await db.execute("SELECT item_id, price, seller_id, status, image_url, tags FROM market_items WHERE thread_id = ?", (thread_id,))
+            cursor = await db.execute("SELECT item_id, price, seller_id, status, image_url, tags FROM market_items WHERE message_id = ?", (message_id,))
             row = await cursor.fetchone()
             
             if not row:
@@ -71,22 +72,25 @@ class BuyView(discord.ui.View):
                 
                 await db.commit() # Commit EVERYTHING together
                 
-                await interaction.response.send_message(f"✅ **取引成立！**\n`{price:,}` 円支払いました。{payout_msg}", ephemeral=True)
+                await interaction.response.send_message(f"✅ 購入しました。\n`{price:,}` 円支払いました。{payout_msg}", ephemeral=True)
 
             except ValueError:
-                await interaction.response.send_message(f"❌ 残高不足です！ ({price:,} クレジット必要)", ephemeral=True)
+                await interaction.response.send_message(f"❌ 残高不足 ({price:,} 円必要)", ephemeral=True)
                 return
             except Exception as e:
-                await interaction.response.send_message(f"❌ エラーが発生しました: {e}", ephemeral=True)
+                await interaction.response.send_message(f"❌ エラー: {e}", ephemeral=True)
                 return
             
             # --- Visual Transfer & Logging ---
             try:
-                # 1. Log to shadow-logs
-                log_channel = discord.utils.get(interaction.guild.text_channels, name="shadow-logs")
+                # 1. Log to market-logs
+                log_channel = discord.utils.get(interaction.guild.text_channels, name="market-logs")
+                # Fallback
+                if not log_channel: log_channel = discord.utils.get(interaction.guild.text_channels, name="shadow-logs")
+                
                 if log_channel:
 
-                    log_embed = discord.Embed(title="💸 Transaction Log", color=discord.Color.green())
+                    log_embed = discord.Embed(title="Transaction Log", color=discord.Color.green())
                     log_embed.add_field(name="Item ID", value=f"#{item_id}", inline=True)
                     log_embed.add_field(name="Buyer", value=buyer.mention, inline=True)
                     log_embed.add_field(name="Seller", value=f"<@{seller_id}>" if seller_id else "Unknown", inline=True)
@@ -95,13 +99,11 @@ class BuyView(discord.ui.View):
                     await log_channel.send(embed=log_embed)
 
                 # 2. Cleanup Seller Message
-                # We know thread_id is interaction.channel_id
-                # But message_id? Interaction.message.id!
                 try:
                     await interaction.message.delete()
                 except:
                     # Could not delete, maybe edit
-                    await interaction.message.edit(content=f"❌ **完売 (Sold)**", view=None, embed=None)
+                    await interaction.message.edit(content=f"❌ **完売**", view=None, embed=None)
 
                 # 3. Post to Buyer's Gallery
                 async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db_gal:
@@ -118,10 +120,7 @@ class BuyView(discord.ui.View):
                          except: pass
                     
                     if buyer_thread:
-                         # Reconstruct Embed for Gallery
-                         # Need to fetch details again or use what we have? 
-                         # We have img_url from logging step
-                         gallery_embed = discord.Embed(title=f"🖼️ 所持品 (ID: #{item_id})", color=discord.Color.gold())
+                         gallery_embed = discord.Embed(title=f"所持品 (ID: #{item_id})", color=discord.Color.gold())
                          if img_url: gallery_embed.set_image(url=img_url)
                          gallery_embed.add_field(name="Tags", value=tags_str, inline=False)
                          
@@ -129,9 +128,9 @@ class BuyView(discord.ui.View):
                          new_thread_id = buyer_thread.id
                          new_msg_id = new_msg.id
                     else:
-                         await interaction.followup.send("⚠️ あなたのギャラリーが見つかりませんでした。`!join` で作成してください。", ephemeral=True)
+                         await interaction.followup.send("ギャラリーが見つかりません。`!join` してください。", ephemeral=True)
                 else:
-                     await interaction.followup.send("⚠️ ギャラリー未登録のため、アイテムは倉庫(DB)に保管されました。`!join` してください。", ephemeral=True)
+                     await interaction.followup.send("ギャラリー未登録のため、アイテムは倉庫に保管されました。", ephemeral=True)
                 
                 # Update DB with new location
                 if new_thread_id:
@@ -231,13 +230,13 @@ class MarketCog(commands.Cog):
             items = await cursor.fetchall()
             
         if not items:
-            await ctx.send("🏪 現在販売中の作品がありません。先に絵を鑑定してもらって売ってみましょう！")
+            await ctx.send("販売中の作品がありません。")
             return
 
-        embed = discord.Embed(title="🏰 AIアートギャラリー (Market)", color=discord.Color.purple())
+        embed = discord.Embed(title="販売リスト", color=discord.Color.purple())
         for item_id, price, score, url in items:
             embed.add_field(
-                name=f"🖼️ No.{item_id} (スコア: {score:.2f})",
+                name=f"ID: {item_id} (スコア: {score:.2f})",
                 value=f"価格: `{price:,} 円`\n[画像を見る]({url})",
                 inline=False
             )
@@ -264,7 +263,7 @@ class MarketCog(commands.Cog):
             await db.execute("UPDATE market_items SET is_locked = ? WHERE item_id = ?", (new_lock, item_id))
             await db.commit()
             
-            status = "🔒 ロックしました (買収には2倍の価格が必要です)" if new_lock else "🔓 ロック解除しました"
+            status = "ロックしました (買収価格: 2倍)" if new_lock else "ロック解除しました"
             await ctx.send(f"✅ {status}")
 
     @commands.Cog.listener()
@@ -296,50 +295,10 @@ class MarketCog(commands.Cog):
             row = await cursor.fetchone()
             
             if not row:
-                await ctx.send("❌ その番号の作品は見つかりませんでした。")
+                await ctx.send("❌ アイテムが見つかりません。")
                 return
             
             price, image_url, status, is_locked, current_owner_id = row
-            
-            # Allow buying if 'on_sale' OR ('owned' AND locked/force-buy scenario)
-            # Actually simplifies to: is it buyable?
-            # User requirement: "If locked, pay double... ignore lock"
-            # Standard flow: 'on_sale' items.
-            # Locked flow: 'owned' items (locked or not? actually user said "Lock it -> Force buy").
-            # So we allow buying 'owned' items if we pay the price?
-            # Or only if Locked?
-            # "Locking makes it not sellable... unless double price."
-            # Implicitly: Can we buy UNLOCKED owned items?
-            # Usually strict ownership means NO.
-            # But the user said: "Money can buy anything".
-            # Let's assume:
-            # 1. 'on_sale': Buy at Price.
-            # 2. 'owned':
-            #    - LOCKED: Buy at 2x Price.
-            #    - UNLOCKED: NOT FOR SALE? Or Buy at Price?
-            #    - User request: "When I don't want to sell... Lock it." implies Unlocked MIGHT be sellable?
-            #    - OR: Unlocked = Not Listed. (Safe)
-            #    - Locked = Not Listed but Force Buyable.
-            #    - BUT, if I don't list it, it's safe?
-            #    - Current system: 'owned' = Safe. 'on_sale' = Listed.
-            #    - User said: "I want to lock it... (implies it WAS vulnerable?)"
-            #    - Wait, currently 'owned' items CANNOT be bought.
-            #    - Maybe the user wants ALL items to be buyable?
-            #    - "Lock it... double price override".
-            #    - This suggests the world is dangerous and items CAN be bought from inventory?
-            #    - Let's ask or assume?
-            #    - "If I don't want to sell, I lock it." -> Implies "If I don't lock it, it sells?"
-            #    - YES. This is a PVP change. "Everything is for sale".
-            #    - So: 
-            #      - 'on_sale': Clearly for sale.
-            #      - 'owned': Implicitly for sale at Current Price? OR
-            #      - User said: "Instead of price setting... Lock... force buy."
-            #      - Let's implement:
-            #        - Status 'owned' is BUYABLE at Current Price.
-            #        - Status 'owned' + Locked is BUYABLE at 2x Price.
-            #      - This makes the game very chaotic (stealing).
-            #      - User said "Locking... double price override".
-            #    - I'll implement: Buying is always possible.
             
             if current_owner_id == ctx.author.id:
                  await ctx.send("❌ 自分の商品は購入できません。")
@@ -350,19 +309,19 @@ class MarketCog(commands.Cog):
             # Lock Logic
             if is_locked:
                 final_price = price * 2
-                embed = discord.Embed(title="🔒 この商品はロックされています", description=f"現在の所有者が販売を拒否しています。\n**{final_price:,} Credits** (2倍) を支払えば、強制的に買収できます。\n\n**買収しますか？**", color=discord.Color.red())
+                embed = discord.Embed(title="ロックされています", description=f"所有者が販売を拒否しています。\n**{final_price:,} Credits** (2倍) で強制買収しますか？", color=discord.Color.red())
                 view = ConfirmView(ctx.author)
                 msg = await ctx.send(embed=embed, view=view)
                 await view.wait()
                 
                 if not view.value:
-                    await msg.edit(content="❌ 買収をキャンセルしました。", view=None, embed=None)
+                    await msg.edit(content="キャンセルしました。", view=None, embed=None)
                     return
             
             # Check balance
             buyer_balance = await self.bot.bank.get_balance(ctx.author)
             if buyer_balance < final_price:
-                await ctx.send(f"❌ 残高が不足しています。(必要: {final_price:,} 円, 保有: {buyer_balance:,} 円)")
+                await ctx.send(f"❌ 残高不足 (必要: {final_price:,} 円)")
                 return
             
             # Process Transaction
@@ -389,20 +348,17 @@ class MarketCog(commands.Cog):
                 )
                 await db.commit()
                 
-                msg_text = f"🎉 **購入成功！**\n`{final_price:,} 円`を支払いました。"
+                msg_text = f"購入完了。\n`{final_price:,} 円`を支払いました。"
                 if is_locked:
-                     msg_text = f"🔓⛏️ **強引な買収に成功しました！**\n(ロックを破壊し、2倍の `{final_price:,} 円` を支払いました)"
+                     msg_text = f"買収成功。\n(2倍価格 `{final_price:,} 円`)"
                 
-                embed = discord.Embed(title="取引成立", description=msg_text, color=discord.Color.green())
+                embed = discord.Embed(title="取引完了", description=msg_text, color=discord.Color.green())
                 embed.set_image(url=image_url)
-                embed.set_footer(text=f"新価格: {new_base_price:,} Credits (インフレ率 +10%)")
+                embed.set_footer(text=f"新価格: {new_base_price:,} Credits")
                 await ctx.send(embed=embed)
                 
             except ValueError as e:
                  await ctx.send(f"❌ 取引失敗: {e}")
-
-
-
 
 async def setup(bot):
     await bot.add_cog(MarketCog(bot))

@@ -35,7 +35,7 @@ class InventoryView(discord.ui.View):
         end = start + self.per_page
         batch = self.items[start:end]
         
-        embed = discord.Embed(title=f"🎒 {self.ctx.author.display_name}の持ち物 ({self.current_page + 1}/{self.max_page + 1})", color=discord.Color.gold())
+        embed = discord.Embed(title=f"{self.ctx.author.display_name}の所持品 ({self.current_page + 1}/{self.max_page + 1})", color=discord.Color.gold())
         if not batch:
              embed.description = "表示するアイテムがありません。"
              return embed
@@ -53,7 +53,7 @@ class InventoryView(discord.ui.View):
     @discord.ui.button(label="◀️", style=discord.ButtonStyle.blurple)
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user != self.ctx.author:
-            await interaction.response.send_message("自分以外のインベントリは操作できません。", ephemeral=True)
+            await interaction.response.send_message("他人のインベントリは操作できません。", ephemeral=True)
             return
 
         if self.current_page > 0:
@@ -66,7 +66,7 @@ class InventoryView(discord.ui.View):
     @discord.ui.button(label="▶️", style=discord.ButtonStyle.blurple)
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user != self.ctx.author:
-            await interaction.response.send_message("自分以外のインベントリは操作できません。", ephemeral=True)
+            await interaction.response.send_message("他人のインベントリは操作できません。", ephemeral=True)
             return
 
         if self.current_page < self.max_page:
@@ -189,25 +189,16 @@ class BrokerCog(commands.Cog):
         self.ai_client_score = None
         self.ai_client_tag = None
         self.setup_clients()
-        self.setup_clients()
-        # self.tag_data = {} # Removed
-        # self.load_tag_data() # Removed
         
         # AI Queue System
         self.ai_queue = asyncio.Queue()
         self.ai_worker_task = self.bot.loop.create_task(self.ai_worker())
         
-        # BloomFilter removed
-        # self.bloom = BloomFilter(capacity=10000, error_rate=0.001)
-        # self.bot.loop.create_task(self.initialize_bloom_filter())
-        
-        self.daily_task_loop.start()
+        # self.daily_task_loop.start() # Removed
 
     def cog_unload(self):
-        self.daily_task_loop.cancel()
+        # self.daily_task_loop.cancel() # Removed
         self.ai_worker_task.cancel()
-        # Save Bloom Filter on unload
-        # self.bloom.save_to_file("bloom_filter.bin") # Removed
 
     def setup_clients(self):
         try:
@@ -220,15 +211,7 @@ class BrokerCog(commands.Cog):
             self.ai_client_score = None
             self.ai_client_tag = None
 
-    # load_tag_data Removed
 
-    @tasks.loop(hours=24)
-    async def daily_task_loop(self):
-        """Runs daily to decay saturation (economy maintenance)"""
-        # await self.update_daily_trends() # Removed
-        await self.decay_saturation()
-
-    # initialize_bloom_filter Removed
 
     async def ai_worker(self):
         """Worker to process AI requests sequentially."""
@@ -259,32 +242,14 @@ class BrokerCog(commands.Cog):
             except Exception as e:
                 print(f"AI Worker Error: {e}")
 
-    @daily_task_loop.before_loop
-    async def before_daily_task(self):
-        await self.bot.wait_until_ready()
-        # Sleep until 6 AM
-        now = datetime.now()
-        target = now.replace(hour=6, minute=0, second=0, microsecond=0)
-        if now >= target:
-            target += timedelta(days=1)
-        # For testing, we might want to run immediately if DB is empty, but let's just log.
-        print(f"Next Daily Trend Update: {target}")
-        await asyncio.sleep((target - now).total_seconds())
 
-    # update_daily_trends Removed
-
-    # get_current_trends Removed
 
     def _run_predict_sync(self, client, file_path):
         """Run prediction in a separate thread"""
-        print(f"DEBUG: Thread Running for {file_path}")
         try:
-             # Try passing path directly first?
-             # Some Gradio apps accept path strings.
-             # If this fails, we catch it.
              return client.predict(handle_file(file_path), api_name="/predict")
         except Exception as e:
-             print(f"DEBUG: Prediction Thread Error: {e}")
+             print(f"Prediction Error: {e}")
              raise e
 
     def calculate_phash(self, image_path):
@@ -312,256 +277,95 @@ class BrokerCog(commands.Cog):
                 continue
 
         if min_dist <= 5:
-            return 100, f"⛔ **重複警告** (類似度: {min_dist})", min_dist
+            return 100, f"類似画像あり (類似度: {min_dist})", min_dist
         else:
-            return 0, f"✅ **確認完了** (新規アイテム)", min_dist
-
-    async def update_market_trends(self, tags, db_conn=None):
-        """Update saturation for tags on new upload."""
-        if db_conn:
-            for tag in tags:
-                await db_conn.execute("INSERT OR IGNORE INTO market_trends (tag_name) VALUES (?)", (tag,))
-                await db_conn.execute("""
-                    UPDATE market_trends 
-                    SET saturation = saturation + 1
-                    WHERE tag_name = ?
-                """, (tag,))
-        else:
-            async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-                await self.update_market_trends(tags, db)
-                await db.commit()
-
-    async def decay_saturation(self):
-        """Called daily to reduce saturation."""
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            # Decay by 10% or at least 1
-            await db.execute("""
-                UPDATE market_trends 
-                SET saturation = CAST(saturation * 0.9 AS INTEGER) 
-                WHERE saturation > 0
-            """)
-            await db.commit()
-        print("Daily Saturation Decay Applied.")
-
-
-
-    async def get_tag_value_modifier(self, tags):
-        # Logarithmic Saturation Decay
-        # Multiplier = 1 / log10(saturation + 2)
-        # Base saturation starts at 0.
-        # If saturation is 100 -> log10(102) ~ 2.0 -> Mult ~ 0.5
-        # If saturation is 500 -> log10(502) ~ 2.7 -> Mult ~ 0.37
-        
-        multiplier = 1.0
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            for tag in tags:
-                cursor = await db.execute("SELECT current_price, saturation FROM market_trends WHERE tag_name = ?", (tag,))
-                row = await cursor.fetchone()
-                
-                if row:
-                    price, sat = row
-                    # Apply saturation penalty
-                    # Use a weighted average or minimum multiplier?
-                    # Let's use the WORST modifier (the most saturated tag pulls down the whole value)
-                    # Or average? Average feels fairer.
-                    
-                    sat_mult = 1.0 / math.log10(max(sat, 0) + 2)
-                    
-                    # Accumulate? Let's average the multipliers of known tags
-                    # But we need to handle "no record" tags as 1.0
-                    # This logic is complex. Simplified:
-                    # Modify the aggregate multiplier by the impact of this tag.
-                    # Let's take the Minimum modifier found.
-                    if sat_mult < multiplier:
-                         multiplier = sat_mult
-        
-        return max(multiplier, 0.1)
-
-
-
-    # trends command Removed
-
-    async def _download_and_hash(self, url):
-        """Downloads image from URL and calculates pHash."""
-        temp_path = f"temp_{uuid.uuid4()}.png"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    if resp.status != 200: return None, None
-                    data = await resp.read()
-            with open(temp_path, "wb") as f: f.write(data)
-            
-            img_hash = await asyncio.to_thread(self.calculate_phash, temp_path)
-            return temp_path, img_hash
-        except Exception as e:
-            print(f"Download Error: {e}")
-            if os.path.exists(temp_path): os.remove(temp_path)
-            return None, None
-
-    async def _run_tagger(self, file_path):
-        """Runs the tagger AI via Queue. Returns (tag_list, tags_str, character_list)."""
-        if not self.ai_client_tag: return [], "", []
-        
-        future = self.bot.loop.create_future()
-        await self.ai_queue.put(('tag', file_path, future))
-        
-        try:
-            # Enforce 20s timeout
-            res = await asyncio.wait_for(future, timeout=30.0) # Slightly longer to account for queue wait
-
-            # Debug output for verification
-            # print(f"DEBUG: Tagger Raw Output Type: {type(res)}")
-            
-            # Helper to parse Gradio Label output
-            def parse_gradio_label(data):
-                if isinstance(data, dict) and 'confidences' in data:
-                    return {item['label']: item['confidence'] for item in data['confidences']}
-                return data if isinstance(data, dict) else {}
-
-            # Initialize containers
-            confidences = {}
-            character_confidences = {}
-            
-            # Handle Tuple Output (New Tagger Model: [comb_tags_str, rating_dict, char_dict, gen_dict])
-            if isinstance(res, (list, tuple)) and len(res) >= 3:
-                # index 2 is character tags
-                # index 3 is general tags
-                
-                if len(res) > 3:
-                    confidences = parse_gradio_label(res[3])
-                elif len(res) > 0 and isinstance(res[0], dict):
-                     # Fallback if structure is different
-                    confidences = parse_gradio_label(res[0])
-
-                if isinstance(res[2], dict) or (isinstance(res[2], dict) and 'confidences' in res[2]):
-                    character_confidences = parse_gradio_label(res[2])
-
-            elif isinstance(res, dict):
-                confidences = parse_gradio_label(res)
-
-            # Fallback for file path output
-            if isinstance(res, str) and os.path.exists(res):
-                 # This path is legacy/fallback, unlikely to happen with this model
-                 pass
-
-            tag_list = []
-            character_list = []
-
-            # Process General Tags
-            if confidences:
-                # Ensure values are floats
-                clean_confidences = {}
-                for k, v in confidences.items():
-                    try:
-                        clean_confidences[k] = float(v)
-                    except:
-                        continue
-                        
-                sorted_tags = sorted(clean_confidences.items(), key=lambda x: x[1], reverse=True)
-                tag_list = [t[0] for t in sorted_tags if t[1] > 0.35][:20]
-
-            # Process Character Tags
-            if character_confidences:
-                clean_chars = {}
-                for k, v in character_confidences.items():
-                     try:
-                        clean_chars[k] = float(v)
-                     except:
-                        continue
-
-                sorted_chars = sorted(clean_chars.items(), key=lambda x: x[1], reverse=True)
-                character_list = [c[0] for c in sorted_chars if c[1] > 0.5] # Higher threshold for chars
-
-            return tag_list, ", ".join(tag_list), character_list
-                
-        except asyncio.TimeoutError:
-            print("Tagging Timeout (Queue/Process limit reached)")
-        except Exception as e:
-            print(f"Tagging Error: {e}")
-            traceback.print_exc()
-            
-        return [], "timeout_fallback", []
-
-    # _fetch_tag_count (Danbooru) Removed
-
-    async def _run_scorer(self, file_path):
-        """Runs the aesthetic scorer AI via Queue."""
-        if not self.ai_client_score: return random.uniform(2.0, 5.0)
-        
-        future = self.bot.loop.create_future()
-        await self.ai_queue.put(('score', file_path, future))
-        
-        try:
-            # Enforce 20s timeout
-            res = await asyncio.wait_for(future, timeout=30.0)
-            return float(res)
-        except:
-            return random.uniform(2.0, 5.0)
+            return 0, "OK", min_dist
 
     async def _calculate_price(self, score, tag_list, character_list):
-        """Calculates final price, trend bonus, and rarity multiplier."""
-        tag_multiplier = await self.get_tag_value_modifier(tag_list)
+        """Calculates final price."""
         base_price = 1000
         
-        # trends = await self.get_current_trends() # Removed
         trend_bonus = 0
         matched_trends = []
         
-        # Trend logic removed
-        
-        # Character Bonus
         char_bonus = 0
         if character_list:
             char_bonus = 2000 * len(character_list)
+        
+        # Tag Bonus (Simple Count)
+        # 100 Credits per tag
+        tag_bonus = len(tag_list) * 100
 
-        # --- Rarity Bonus (Danbooru) Removed ---
         rarity_multiplier = 1.0
-        checked_tags = [] # No longer used
+        checked_tags = []
 
-        # Ensure score is within bounds
         score = max(0.0, min(10.0, score))
-        
-        # New Formula: 1000 * (score^2)
         base_value_exp = int(1000 * (score ** 2))
+        final_price = base_value_exp + char_bonus + tag_bonus
         
-        # Simple Price Calculation
-        final_price = base_value_exp + char_bonus
-        
-        # Stocks Logic Removed
-
         return final_price, trend_bonus, matched_trends, char_bonus, rarity_multiplier, checked_tags
-
-
 
     @commands.command(name="join")
     async def join(self, ctx):
-        """闇市の隠れ家を作成します。"""
+        """プライベートルームを作成し、トレーダーとして登録します。"""
+        # 1. Permission/Role Check
+        role = discord.utils.get(ctx.guild.roles, name="トレーダー")
+        if role and role not in ctx.author.roles:
+            try:
+                await ctx.author.add_roles(role)
+            except:
+                pass # Fail silently if permission issue, admin can fix
+
+        # 2. Gallery Setup (From old Register)
+        market_category = discord.utils.get(ctx.guild.categories, name="マーケット")
+        # Legacy check
+        if not market_category: market_category = discord.utils.get(ctx.guild.categories, name="闇市 (Shadow Market)")
+        
+        forum = discord.utils.get(ctx.guild.forums, name="ギャラリー")
+        if not forum: forum = discord.utils.get(ctx.guild.forums, name="闇市ギャラリー")
+
+        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
+            # Check existing gallery registration
+            cursor = await db.execute("SELECT thread_id FROM user_galleries WHERE user_id = ?", (ctx.author.id,))
+            row = await cursor.fetchone()
+            
+            if not row and forum:
+                try:
+                    thread_with_message = await forum.create_thread(
+                        name=f"Gallery: {ctx.author.display_name}",
+                        content=f"{ctx.author.mention} のギャラリー"
+                    )
+                    t = thread_with_message.thread if hasattr(thread_with_message, 'thread') else thread_with_message
+                    
+                    await db.execute("INSERT INTO user_galleries (user_id, thread_id) VALUES (?, ?)", (ctx.author.id, t.id))
+                    # Bonus for new joining
+                    await self.bot.bank.deposit_credits(ctx.author, 3000, db_conn=db)
+                    await db.commit()
+                except Exception as e:
+                    print(f"Gallery creation failed: {e}")
+
+        # 3. Private Room Setup
         try:
             guild = ctx.guild
-            cat_name = "🕵️ Hideouts"
+            cat_name = "Private Rooms"
             category = discord.utils.get(guild.categories, name=cat_name)
             
             if not category:
-                # Create Private Category
                 overwrites = {
                     guild.default_role: discord.PermissionOverwrite(read_messages=False),
                     guild.me: discord.PermissionOverwrite(read_messages=True)
                 }
                 category = await guild.create_category(cat_name, overwrites=overwrites)
             
-            # Check existing channel (Use ID for safety)
-            # Sanitized Name: hideout-username-1234
             safe_name = "".join(c for c in ctx.author.name.lower() if c.isalnum() or c in "-_")
-            ch_name = f"hideout-{safe_name}-{ctx.author.id}"
+            ch_name = f"room-{safe_name}-{ctx.author.id}"
             
-            # Also check simpler name for backward compatibility if we want, but let's stick to new standard
             existing = discord.utils.get(category.text_channels, name=ch_name)
             
             if existing:
-                await ctx.send(f"⚠️ あなたの隠れ家は既に存在します: {existing.mention}")
+                await ctx.send(f"既にチャンネルが存在します: {existing.mention}")
                 return
                 
-            # Create Channel
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(read_messages=False),
                 ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True, embed_links=True),
@@ -569,61 +373,52 @@ class BrokerCog(commands.Cog):
             }
             
             channel = await guild.create_text_channel(ch_name, category=category, overwrites=overwrites)
-            await ctx.send(f"✅ 隠れ家を用意しました... こちらへどうぞ: {channel.mention}")
+            await ctx.send(f"チャンネルを作成しました: {channel.mention}")
             
-            await channel.send(f"🕵️ **ようこそ、{ctx.author.mention}。**\nここはあなただけの隠れ家です。\n`!smuggle` で密輸品を鑑定・売却しましょう。\n(誰にも見られることはありません...)")
+            await channel.send(f"ようこそ、{ctx.author.mention}。\nここでアイテムを売却 (`!sell`) できます。")
 
         except Exception as e:
-            await ctx.send(f"❌ 隠れ家の作成に失敗しました: {e}")
+            await ctx.send(f"エラー: {e}")
             traceback.print_exc()
 
-    @commands.command(name="smuggle")
+    @commands.command(name="smuggle", aliases=["sell"])
     async def smuggle(self, ctx):
-        """The main loop: Upload -> Risk -> Gamble -> Appraise -> Sell"""
+        """画像アイテムを売却します。"""
         # 1. Restriction Check
-        if not ctx.channel.name.startswith("hideout-"):
-            await ctx.send("🚫 **密輸は「隠れ家」で行ってください。**\n`!join` で隠れ家を作成できます。")
+        if not ctx.channel.name.startswith("room-") and not ctx.channel.name.startswith("hideout-"):
+            await ctx.send("個室 (`room-xxx`) で行ってください。")
             return
 
         if not ctx.message.attachments:
-            await ctx.send("📦 **密輸品(画像)を添付してください！**")
+            await ctx.send("画像ファイルを添付してください。")
             return
             
         attachment = ctx.message.attachments[0]
         if not attachment.content_type.startswith('image/'):
-            await ctx.send("❌ 画像ファイルのみ有効です。")
+            await ctx.send("画像ファイルのみ有効です。")
             return
 
         image_url = attachment.url
-        await ctx.send("🕵️ **密輸作戦を開始します...**")
+        await ctx.send("処理中...")
 
         # 1. Download & Hash
         temp_path, img_hash = await self._download_and_hash(image_url)
         if not temp_path:
-            await ctx.send("❌ ダウンロードに失敗しました。")
+            await ctx.send("ダウンロード失敗。")
             return
 
         try:
-            # 2. Bloom Filter Check Removed
-            # if self.bloom.check(img_hash): ...
-
-            # 3. DB Duplicate Check (Strict & Reliable)
-            # Even if Bloom said "No", we still check DB for *similar* images (hamming distance),
-            # which Bloom Filter cannot do.
             is_dup, dup_msg, _ = await self.get_risk_factor(img_hash)
             
             if is_dup >= 50:
-                 await ctx.send(f"❌ **密輸失敗:** {dup_msg}\n(同じ画像が既に存在します)")
+                 await ctx.send(f"エラー: {dup_msg}")
                  return
 
-            await ctx.send(f"✅ **密輸成功!**\n闇市の鑑定人に連絡しています...")
+            await ctx.send(f"アップロード完了。鑑定中...")
             
-            # 4. AI Valuation
             tag_list, tags_str, character_list = await self._run_tagger(temp_path)
             score = await self._run_scorer(temp_path)
             
-            # Removed score rejection check (< 4.0) to accept all items.
-
             # 5. Pricing
             final_price, trend_bonus, matched_trends, char_bonus, rarity_mult, rare_tags = await self._calculate_price(score, tag_list, character_list)
             
@@ -633,7 +428,6 @@ class BrokerCog(commands.Cog):
             elif score >= 7.0: grade = "A"
             
             # 7. Post to Gallery & DB Insert
-            # 7. Post to Gallery & DB Insert (Atomic)
             item_id = None
             async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
                 cursor = await db.execute(
@@ -644,45 +438,28 @@ class BrokerCog(commands.Cog):
                     (self.bot.user.id, image_url, score, int(final_price * 1.5), img_hash, str(tag_list), grade)
                 )
                 item_id = cursor.lastrowid
-                # Do NOT commit yet
                 
-                # Create Embed
-                embed = discord.Embed(title=f"📦 新規入荷 (ID: #{item_id})", color=discord.Color.purple())
+                embed = discord.Embed(title=f"📦 新規入荷 (ID: #{item_id})", color=discord.Color.blue())
                 embed.set_image(url=image_url)
                 embed.add_field(name="販売者", value=self.bot.user.mention, inline=True)
-                embed.add_field(name="価格", value=f"💰 {int(final_price * 1.5):,}", inline=True)
+                embed.add_field(name="価格", value=f"{int(final_price * 1.5):,} Credits", inline=True)
                 embed.add_field(name="グレード", value=f"**{grade}** ({score:.2f})", inline=True)
                 
-                if rarity_mult > 1.0:
-                     embed.add_field(name="✨ レアリティボーナス", value=f"x{rarity_mult:.1f} ({', '.join(rare_tags[:3])})", inline=True)
-                     
                 if character_list:
                     chars_str = ", ".join(character_list)
-                    embed.add_field(name="👤 キャラクター", value=f"{chars_str} (+{char_bonus:,})", inline=True)
-                if matched_trends:
-                    embed.add_field(name="🔥 トレンドボーナス!", value=f"+{trend_bonus:,} ({', '.join(matched_trends)})", inline=False)
-                embed.add_field(name="特徴 (Tags)", value=tags_str[:1000], inline=False)
+                    embed.add_field(name="キャラクター", value=f"{chars_str}", inline=True)
+                embed.add_field(name="タグ", value=tags_str[:1000], inline=False)
                 
-                # Post Logic & Completion
                 try:
-                    # Pass 'db' to share transaction
                     await self._post_to_gallery(ctx, embed, temp_path, tags_str, item_id, grade, final_price, tag_list, image_url, img_hash, db_conn=db)
-                    
-                    await db.commit() # Commit all changes (Item, Money, Trends)
-                    
+                    await db.commit()
                 except Exception as e:
-                    await ctx.send(f"❌ 投稿処理中にエラーが発生: {e}")
+                    await ctx.send(f"エラー: {e}")
                     traceback.print_exc()
-                    # Implicit Rollback on exit context manager without commit?
-                    # Actually aiosqlite context manager does commit on exit? 
-                    # No, it *closes*. If we didn't commit, changes are lost? 
-                    # SQLite default is to rollback uncommitted transactions on close. Yes.
-                    # But verifying: aiosqlite context manager for CONNECTION just closes it.
-                    # So uncommitted changes are rolled back. Correct.
                     return
 
         except Exception as e:
-            await ctx.send(f"❌ エラーが発生しました: {e}")
+            await ctx.send(f"エラーが発生しました: {e}")
             traceback.print_exc()
         finally:
              if os.path.exists(temp_path): os.remove(temp_path)
@@ -709,22 +486,23 @@ class BrokerCog(commands.Cog):
         if bot_thread:
             thread_ref = bot_thread
             message = await bot_thread.send(
-                content=f"**販売中:** {tags_str[:50]}... (ID: #{item_id})",
+                content=f"**販売:** (ID: #{item_id})",
                 embed=embed,
                 file=discord.File(temp_path, filename="artifact.png"),
                 view=view
             )
-            await ctx.send(f"✅ **密輸成功！(ID: {item_id})**\n公式ギャラリーに入荷しました: {message.jump_url}")
+            await ctx.send(f"✅ 出品完了 (ID: {item_id})\n{message.jump_url}")
         else:
-                forum = discord.utils.get(ctx.guild.forums, name="闇市ギャラリー")
+                forum = discord.utils.get(ctx.guild.forums, name="ギャラリー")
+                if not forum: forum = discord.utils.get(ctx.guild.forums, name="闇市ギャラリー")
+
                 if forum:
-                # ... (Same forum logic)
                     title = f"[{grade}] {tags_str[:30]}..." if len(tags_str) > 30 else f"[{grade}] {tags_str}"
-                    if not title: title = f"[{grade}] 謎の品"
+                    if not title: title = f"[{grade}] Item"
 
                     thread_with_message = await forum.create_thread(
                         name=title,
-                        content=f"**販売中:** {tags_str[:50]}... (ID: #{item_id})",
+                        content=f"**販売:** (ID: #{item_id})",
                         embed=embed,
                         file=discord.File(temp_path, filename="artifact.png"),
                         view=view
@@ -733,75 +511,25 @@ class BrokerCog(commands.Cog):
                     message = thread_with_message.message 
                     if not message and hasattr(thread_ref, 'starter_message'): message = thread_ref.starter_message
                     
-                    await ctx.send(f"✅ **密輸成功！(ID: {item_id})**\n臨時スレッドが作成されました: {thread_ref.mention}")
+                    await ctx.send(f"✅ 出品完了 (ID: {item_id})\n{thread_ref.mention}")
                 else:
-                    await ctx.send("❌ フォーラム「闇市ギャラリー」が見つかりません。`!init_server` を確認してください。")
-                    # If we return here, we must raise exception to trigger rollback in caller!
+                    await ctx.send("フォーラムが見つかりません。")
                     raise Exception("Gallery Forum Not Found")
 
-        # DB Updates & Payment (Atomic)
+        # DB Updates & Payment
         await self.bot.bank.deposit_credits(ctx.author, final_price, db_conn=db_conn)
-        await self.update_market_trends(tag_list, db_conn=db_conn)
+
         
-        # Update Bloom Filter
-        self.bloom.add(image_url)
-        self.bloom.add(img_hash)
-        
-        # Final Link Update
+        # Link Update
         await db_conn.execute(
             "UPDATE market_items SET thread_id = ?, message_id = ? WHERE item_id = ?",
             (thread_ref.id, message.id if message else 0, item_id)
         )
         
-        await ctx.send(f"💰 **報酬受取:** `{final_price:,} Credits` を受け取りました。")
+        await ctx.send(f"💰 報酬: `{final_price:,} Credits`")
 
-    @commands.command(name="register")
-    async def register(self, ctx):
-        """闇のブローカーとして登録し、個人用ギャラリーを開設します。"""
-        
-        async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
-            # 1. Check if already joined
-            cursor = await db.execute("SELECT thread_id FROM user_galleries WHERE user_id = ?", (ctx.author.id,))
-            row = await cursor.fetchone()
-            
-            if row:
-                await ctx.send(f"⚠️ 既に登録済みです。ギャラリー: <#{row[0]}>")
-                return
 
-            # 2. Assign Role & Find Forum
-            role = discord.utils.get(ctx.guild.roles, name="密輸業者")
-            forum = discord.utils.get(ctx.guild.forums, name="闇市ギャラリー")
-            
-            if not forum:
-                await ctx.send("❌ フォーラム `闇市ギャラリー` が見つかりません。管理者に連絡してください。")
-                return
 
-            if role:
-                try:
-                    await ctx.author.add_roles(role)
-                except discord.Forbidden:
-                    await ctx.send("⚠️ ロールの付与に失敗しました(権限不足)。")
-
-            # 3. Create Gallery Thread
-            try:
-                thread_with_message = await forum.create_thread(
-                    name=f"[Gallery] {ctx.author.display_name}",
-                    content=f"{ctx.author.mention} の個人ギャラリーへようこそ。\nここで獲得した戦利品が展示されます。"
-                )
-                thread = thread_with_message.thread if hasattr(thread_with_message, 'thread') else thread_with_message
-                
-                # 4. Save to DB & Give Starting Funds (Atomic)
-                await db.execute("INSERT INTO user_galleries (user_id, thread_id) VALUES (?, ?)", (ctx.author.id, thread.id))
-                await self.bot.bank.deposit_credits(ctx.author, 3000, db_conn=db)
-                
-                await db.commit()
-                
-                await ctx.send(f"🎉 **登録完了！** あなたのギャラリーが開設されました: {thread.mention}\n💰 **開業資金 3,000クレジット** が支給されました！")
-
-            except Exception as e:
-                await ctx.send(f"❌ ギャラリー作成に失敗しました: {e}")
-                traceback.print_exc()
-                # Rollback handled by context manager (no commit)
 
 
     @commands.command(name="inventory", aliases=["bag", "inv"])

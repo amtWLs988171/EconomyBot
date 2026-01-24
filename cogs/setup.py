@@ -24,33 +24,42 @@ class SetupCog(commands.Cog):
     async def init_server(self, ctx):
         """
         サーバーの構成を自動セットアップします。
-        - ロール: 密輸業者
-        - カテゴリ: 🏢 ロビー (Lobby), 🌑 闇市 (Shadow Market)
-        - チャンネル: ルール, 参加受付, 雑談, 密輸現場, 賭博場, 番付, ギャラリー
+        - ロール: トレーダー
+        - カテゴリ: 🏢 ロビー, 📈 マーケット
+        - チャンネル: ルール, 参加受付, 雑談, 買取所, カジノ, ランキング, ギャラリー, 管理者ログ
         """
         guild = ctx.guild
         
         try:
             # 1. Create Role
-            role_name = "密輸業者"
+            role_name = "トレーダー"
             role = discord.utils.get(guild.roles, name=role_name)
             if not role:
-                try:
-                    role = await guild.create_role(name=role_name, color=discord.Color.dark_grey(), hoist=True)
-                    await ctx.send(f"✅ ロール作成完了: {role.mention}")
-                except discord.Forbidden:
-                    await ctx.send("❌ **エラー:** ロール作成権限がありません。")
-                    return
+                # Check for old name to rename
+                old_role = discord.utils.get(guild.roles, name="密輸業者")
+                if old_role:
+                    await old_role.edit(name=role_name, color=discord.Color.blue())
+                    role = old_role
+                    await ctx.send(f"✅ ロール名を変更しました: {role.mention}")
+                else:
+                    try:
+                        role = await guild.create_role(name=role_name, color=discord.Color.blue(), hoist=True)
+                        await ctx.send(f"✅ ロール作成完了: {role.mention}")
+                    except discord.Forbidden:
+                        await ctx.send("エラー: 権限がありません。")
+                        return
             else:
-                await ctx.send(f"ℹ️ ロールは既に存在します: {role.mention}")
+                await ctx.send(f"ロール確認: {role.mention}")
 
             # ---------------------------------------------------------
             # Category 1: Lobby (Public)
             # ---------------------------------------------------------
-            lobby_cat_name = "ロビー (Lobby)"
+            lobby_cat_name = "ロビー"
             lobby_cat = discord.utils.get(guild.categories, name=lobby_cat_name)
-            
-            # Permissions: Everyone can see
+            # Check old
+            if not lobby_cat: lobby_cat = discord.utils.get(guild.categories, name="ロビー (Lobby)")
+            if lobby_cat and lobby_cat.name != lobby_cat_name: await lobby_cat.edit(name=lobby_cat_name)
+
             lobby_overwrites = {
                 guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
                 guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
@@ -58,9 +67,9 @@ class SetupCog(commands.Cog):
             
             if not lobby_cat:
                 lobby_cat = await guild.create_category(lobby_cat_name, overwrites=lobby_overwrites)
-                await ctx.send(f"✅ カテゴリ作成: **{lobby_cat_name}**")
+                await ctx.send(f"✅ カテゴリ作成: {lobby_cat_name}")
             
-            # Channel: rules (Read Only)
+            # Channel: rules
             rules_ch_name = "ルール"
             rules_ch = discord.utils.get(guild.text_channels, name=rules_ch_name, category=lobby_cat)
             if not rules_ch:
@@ -68,124 +77,127 @@ class SetupCog(commands.Cog):
                 await ctx.send(f"✅ チャンネル作成: {rules_ch.mention}")
                 
                 # Post Rules
-                embed = discord.Embed(title="🎮 ゲームの仕組み (How to Play)", color=discord.Color.red())
+                embed = discord.Embed(title="システムガイド", color=discord.Color.blue())
                 embed.description = (
-                    "**💰 目的**\n"
-                    "画像を密輸（アップロード）してクレジットを稼ぎ、闇市のランキング上位を目指しましょう。\n\n"
-                    "**🔄 ゲームの流れ**\n"
-                    "1. **隠れ家確保**: `!join` で自分専用の「隠れ家チャンネル」を作成します。\n"
-                    "2. **密輸**: 隠れ家で `!smuggle` コマンドと共に画像をアップロード。\n"
-                    "3. **査定**: AIが美学スコア(1-10)を判定し、即座に買取金を支払います。\n"
-                    "4. **展示**: 売却された物品は自動的に「闇市ギャラリー」に展示されます。\n\n"
-                    "**⚔️ マケット戦略 (PVP)**\n"
-                    "- **購入**: ギャラリーの品は `!buy [ID]` で誰でも購入可能。\n"
-                    "- **インフレ**: 取引されるたび、価格が **10%** ずつ上昇します。\n"
-                    "- **ロック**: 所有者は `!lock [ID]` で販売拒否が可能。ただし...\n"
-                    "- **強奪**: ロックされた品でも **2倍の価格** を払えば強制買収できます。\n\n"
-                    "**💎 ロイヤルティ**\n"
-                    "- ギャラリーの展示品に `🔥` リアクションがつくと、密輸者(あなた)に **+100 Credits** のボーナスが入ります。\n\n"
-                    "**💻 主なコマンド**\n"
-                    "- `!join`: 隠れ家を作成。\n"
-                    "- `!smuggle`: (隠れ家専用) 画像を売却。\n"
-                    "- `!market`: ギャラリーを見る。\n"
-                    "- `!buy [ID]`: アイテムを購入。\n"
-                    "- `!lock [ID]`: アイテムをロック/解除。\n"
-                    "- `!balance`: 所持金確認。\n"
-                    "- `!pay @user [金額]`: 送金。\n"
+                    "**目的**\n"
+                    "画像を売却してクレジットを稼ぎ、ランキング上位を目指します。\n\n"
+                    "**流れ**\n"
+                    "1. **参加**: `!join` で専用チャンネルを作成。\n"
+                    "2. **売却**: 専用チャンネルで `!sell` (または `!smuggle`) で画像をアップロード。\n"
+                    "3. **査定**: AIが評価し、即座にクレジットが支払われます。\n"
+                    "4. **ギャラリー**: 売却されたアイテムは「ギャラリー」に展示されます。\n\n"
+                    "**💰 ボーナス**\n"
+                    "タグが多いほど査定額がアップします (+100 Credits/個)\n\n"
+                    "**コマンド一覧**\n"
+                    "- `!join`: 参加 / 専用チャンネル作成\n"
+                    "- `!sell`: アイテム売却 (画像添付)\n"
+                    "- `!market`: 販売リスト表示\n"
+                    "- `!buy [ID]`: アイテム購入\n"
+                    "- `!lock [ID]`: 販売ロック/解除\n"
+                    "- `!balance`: 残高確認\n"
+                    "- `!pay @user [金額]`: 送金\n"
                 )
-                embed.set_footer(text="Economy Bot System")
                 await rules_ch.send(embed=embed)
             
-            # Channel: entry (Join Command)
+            # Channel: entry
             entry_ch_name = "参加受付"
             entry_overwrites = {
-                guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=True), # Allow typing !join
+                guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=True),
             }
             entry_ch = discord.utils.get(guild.text_channels, name=entry_ch_name, category=lobby_cat)
             if not entry_ch:
                 entry_ch = await guild.create_text_channel(entry_ch_name, category=lobby_cat, overwrites=entry_overwrites)
                 await ctx.send(f"✅ チャンネル作成: {entry_ch.mention}")
                 
-                # Post Welcome
-                embed = discord.Embed(title="🚪 闇市への入り口", color=discord.Color.dark_blue())
-                embed.description = (
-                    "ようこそ、闇の世界へ。\n"
-                    "取引に参加するには、以下のコマンドを入力して登録を済ませてください。\n\n"
-                    "**コマンド:**\n"
-                    "`!join`\n\n"
-                    "※登録すると、あなただけの「隠れ家」が作成されます。"
-                )
+                embed = discord.Embed(title="参加受付", color=discord.Color.green())
+                embed.description = "参加するには `!join` と入力してください。"
                 await entry_ch.send(embed=embed)
 
 
             # ---------------------------------------------------------
-            # Category 2: Shadow Market (Restricted)
+            # Category 2: Market (Restricted)
             # ---------------------------------------------------------
-            shadow_cat_name = "闇市 (Shadow Market)"
-            shadow_cat = discord.utils.get(guild.categories, name=shadow_cat_name)
+            market_cat_name = "マーケット"
+            market_cat = discord.utils.get(guild.categories, name=market_cat_name)
+            if not market_cat: market_cat = discord.utils.get(guild.categories, name="闇市 (Shadow Market)")
+            if market_cat and market_cat.name != market_cat_name: await market_cat.edit(name=market_cat_name)
             
-            # Permissions: Everyone FALSE, Role TRUE
-            shadow_overwrites = {
+            market_overwrites = {
                 guild.default_role: discord.PermissionOverwrite(read_messages=False),
                 role: discord.PermissionOverwrite(read_messages=True, send_messages=True),
                 guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
             }
 
-            if not shadow_cat:
-                shadow_cat = await guild.create_category(shadow_cat_name, overwrites=shadow_overwrites)
-                await ctx.send(f"✅ カテゴリ作成: **{shadow_cat_name}**")
+            if not market_cat:
+                market_cat = await guild.create_category(market_cat_name, overwrites=market_overwrites)
+                await ctx.send(f"✅ カテゴリ作成: {market_cat_name}")
             else:
-                # Update permissions if exists
-                await shadow_cat.edit(overwrites=shadow_overwrites)
-                await ctx.send(f"♻️ カテゴリ権限更新: **{shadow_cat_name}**")
+                await market_cat.edit(overwrites=market_overwrites)
+                await ctx.send(f"カテゴリ設定更新: {market_cat_name}")
 
             # Create Channels
-            # (Display Name, Code Name (unused here but good for logic), Topic)
             channels_to_create = [
-                ("雑談", "general", "裏社会の社交場。"),
-                # ("トレンド", "trends", "本日の流行情報 (AM 6:00更新)。"), # Removed
-                ("密輸現場", "smuggling-spot", "ここで `!smuggle` コマンドを使用します。"),
-                ("賭博場", "casino", "金と運の使い道。"),
-                ("番付", "leaderboard", "実力者たちのランキング。"),
-                ("ログ", "shadow-logs", "取引履歴。")
+                ("雑談", "general", "交流スペース"),
+                ("買取所", "buy-center", "コマンド用チャンネル"),
+                ("カジノ", "casino", "ミニゲーム"),
+                ("ランキング", "ranking", "資産ランキング"),
+                ("ログ", "market-logs", "取引履歴")
             ]
 
             for ch_display, ch_name, topic in channels_to_create:
-                ch = discord.utils.get(guild.text_channels, name=ch_display, category=shadow_cat)
+                ch = discord.utils.get(guild.text_channels, name=ch_display, category=market_cat)
                 if not ch:
-                    ch = await guild.create_text_channel(ch_display, category=shadow_cat, topic=topic)
+                    # Check for old names to rename? (e.g. smuggling-spot -> buy-center)
+                    # For now just create new ones.
+                    ch = await guild.create_text_channel(ch_display, category=market_cat, topic=topic)
                     await ctx.send(f"✅ チャンネル作成: {ch.mention}")
+
+            # Admin Log Channel (New)
+            admin_log_name = "backend-logs"
+            admin_log = discord.utils.get(guild.text_channels, name=admin_log_name, category=market_cat)
+            if not admin_log:
+                admin_overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                    role: discord.PermissionOverwrite(read_messages=False), 
+                    guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                }
+                admin_log = await guild.create_text_channel(admin_log_name, category=market_cat, topic="管理者ログ", overwrites=admin_overwrites)
+                await ctx.send(f"✅ 管理者ログ作成: {admin_log.mention}")
+
             
             # Forum: Gallery
-            forum_name = "闇市ギャラリー"
-            forum = discord.utils.get(guild.forums, name=forum_name, category=shadow_cat)
+            forum_name = "ギャラリー"
+            forum = discord.utils.get(guild.forums, name=forum_name, category=market_cat)
+            if not forum: forum = discord.utils.get(guild.forums, name="闇市ギャラリー", category=market_cat)
+            if forum and forum.name != forum_name: await forum.edit(name=forum_name)
+
             if not forum:
                 tags = [
                     discord.ForumTag(name="販売中", emoji="🟢"),
                     discord.ForumTag(name="完売", emoji="🔴"),
                     discord.ForumTag(name="S級", emoji="💎"),
-                    discord.ForumTag(name="偽物", emoji="💩"),
                     discord.ForumTag(name="注目", emoji="🔥")
                 ]
-                forum = await guild.create_forum(name=forum_name, category=shadow_cat, topic="密輸品展示場", available_tags=tags)
+                forum = await guild.create_forum(name=forum_name, category=market_cat, topic="アイテム展示場", available_tags=tags)
                 await ctx.send(f"✅ フォーラム作成: {forum.mention}")
             
-            # Bot Gallery Setup (Same as before)
+            # Bot Gallery Setup
             if forum:
                 async with aiosqlite.connect(self.bot.bank.db_path, timeout=60.0) as db:
                      cursor = await db.execute("SELECT thread_id FROM user_galleries WHERE user_id = ?", (self.bot.user.id,))
                      row = await cursor.fetchone()
                      if not row:
-                         thread = await forum.create_thread(name="[Official] 闇のブローカー", content="公式取引所")
+                         thread = await forum.create_thread(name="[Official] System Shop", content="公式ショップ")
                          t = thread.thread if hasattr(thread, 'thread') else thread
+                         # Create record for bot
                          await db.execute("INSERT OR REPLACE INTO user_galleries (user_id, thread_id) VALUES (?, ?)", (self.bot.user.id, t.id))
                          await db.commit()
-                         await ctx.send("✅ 公式ギャラリー設立完了")
+                         await ctx.send("✅ 公式ショップ設立完了")
 
-            await ctx.send("🎉 **サーバー構成の再構築が完了しました！**")
+            await ctx.send("セットアップ完了。")
 
         except Exception as e:
-            await ctx.send(f"❌ エラーが発生しました: {e}")
+            await ctx.send(f"エラー: {e}")
             import traceback
             traceback.print_exc()
 
